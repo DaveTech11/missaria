@@ -1,0 +1,28 @@
+# deploy/miss-aria.service
+#
+# systemd unit for running Miss Aria directly on a VPS, as an alternative
+# to PM2 (ecosystem.config.js at the project root). Install with:
+#
+#   sudo cp deploy/miss-aria.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now miss-aria
+#
+# Edit User=, WorkingDirectory=, and the node path below to match your VPS.
+
+[Unit]
+Description=Miss Aria WhatsApp Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aria
+WorkingDirectory=/opt/miss-aria
+ExecStart=/usr/bin/node bot.js
+Restart=on-failure
+RestartSec=5
+# .env sits in WorkingDirectory — dotenv loads it automatically at startup.
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

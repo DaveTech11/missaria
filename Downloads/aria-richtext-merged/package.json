@@ -1,0 +1,30 @@
+
+{
+  "name": "Miss aria",
+  "version": "3.0.0",
+  "description": "Miss arai next gen",
+  "main": "bot.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+"@whiskeysockets/baileys": "github:xcoursed/baileys",
+"form-data": "^4.0.0",
+"node-telegram-bot-api": "^0.67.0",
+"axios": "^1.6.0",
+"better-sqlite3": "^11.3.0",
+"openai": "^4.28.0",
+"adm-zip": "^0.5.15",
+"bcryptjs": "^2.4.3",
+"canvas": "^3.2.3",
+"puppeteer": "^22.0.0",
+"dotenv": "^16.4.5",
+"nodemailer": "^6.9.14",
+"play-dl": "^1.9.7",
+"sharp": "^0.33.4",
+"yt-search": "^2.13.1"
+  },
+  "scripts": {
+    "start": "node bot.js"
+  }
+}

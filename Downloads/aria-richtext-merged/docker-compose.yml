@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  miss-aria:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "3000:3000" # health check / status endpoint — see server/statusServer.js
+    volumes:
+      - aria-sessions:/app/sessions # paired WhatsApp session — losing this means re-pairing
+      - aria-data:/app/data # JSON/SQLite stores: warns, mutes, bans, scheduler, report recipients, etc.
+
+volumes:
+  aria-sessions:
+  aria-data:
