@@ -103,7 +103,7 @@ Automatic moderation is paused for this group.</blockquote>`;
  const memoryPage=async(chat,user)=>{if(!ownerOnly(user))return denied(chat);const notes=memory.list(user);return send(chat,'🧠 <b>Aria Memory</b>\n\n'+(notes.map(n=>`• <code>${n.id}</code> — ${esc(n.text)}`).join('\n')||'No owner memories saved.')+'\n\nSay: <code>Aria, remember that ...</code>')};
 
  function confirm(chat,user,action,payload,label){const token=confirmations.create({ownerId:user,action,payload});pendingTextConfirm.set(String(user),token);return send(chat,`⚠️ <b>Confirmation required</b>\n\n${esc(label)}\n\nYou can tap <b>Confirm</b>/<b>Cancel</b>, or reply <code>yes</code> / <code>cancel</code>.`,{reply_markup:{inline_keyboard:[[ {text:'✅ Confirm',callback_data:`aria_confirm_${token}`},{text:'❌ Cancel',callback_data:'aria_cancel_confirm'} ]]}})}
- async function executeConfirmed(chat,user,token){if(pendingTextConfirm.get(String(user))===String(token))pendingTextConfirm.delete(String(user));const c=confirmations.consume(token,user);if(!c)return send(chat,'⌛ Confirmation expired or already used.');if(c.action==='restart'){audit({action:'restart',target:'process'});return send(chat,'♻️ Restarting Miss Aria…').then(()=>setTimeout(()=>process.exit(0),300))}if(c.action==='emergency'){const r=await registry.execute('emergencyLockdown',{userId:user,enabled:c.payload.enabled});audit({action:'emergency',target:'all-verified-groups',detail:String(c.payload.enabled)});return send(chat,r.success?`🚨 Emergency mode ${c.payload.enabled?'ACTIVE':'DISABLED'}.\nSuccessful groups: ${r.data.results.filter(x=>x.success).length}/${r.data.results.length}`:`❌ ${esc(r.error.message)}`)}if(c.action==='ban'){const r=await registry.execute('moderate',{userId:user,...c.payload,action:'ban'});audit({action:'ban',target:`${c.payload.chatId}:${c.payload.targetUserId}`,detail:c.payload.reason||''});return send(chat,r.success?'🔨 Ban completed.':`❌ ${esc(r.error.message)}`)}if(c.action==='restore'){const r=backupApi.restore(user,c.payload.file);audit({action:'restore',target:c.payload.file});return send(chat,r.success?'♻️ Backup restored. Restart the bot to fully reload every in-memory component.':`❌ ${esc(r.error)}`)}if(c.action==='lock'||c.action==='unlock'){const r=await registry.execute('lockGroup',{userId:user,chatId:c.payload.chatId,locked:c.action==='lock'});audit({action:c.action,target:String(c.payload.chatId)});return send(chat,r.success?`✅ Group ${c.action==='lock'?'locked':'unlocked'}.`:`❌ ${esc(r.error.message)}`)}return send(chat,'❌ Unknown confirmation.');}
+ async function executeConfirmed(chat,user,token){if(pendingTextConfirm.get(String(user))===String(token))pendingTextConfirm.delete(String(user));const c=confirmations.consume(token,user);if(!c)return send(chat,'⌛ Confirmation expired or already used.');if(c.action==='restart'){audit({action:'restart',target:'process'});return send(chat,'♻️ Restarting Miss Aria…').then(()=>setTimeout(()=>process.exit(0),300))}if(c.action==='emergency'){const r=await registry.execute('emergencyLockdown',{userId:user,enabled:c.payload.enabled});audit({action:'emergency',target:'all-verified-groups',detail:String(c.payload.enabled)});return send(chat,r.success?`🚨 Emergency mode ${c.payload.enabled?'ACTIVE':'DISABLED'}.\nSuccessful groups: ${r.data.results.filter(x=>x.success).length}/${r.data.results.length}`:`❌ ${esc(r.error.message)}`)}if(c.action==='ban'){const r=await registry.execute('moderate',{userId:user,...c.payload,action:'ban'});audit({action:'ban',target:`${c.payload.chatId}:${c.payload.targetUserId}`,detail:c.payload.reason||''});return send(chat,r.success?'🔨 Ban completed.':`❌ ${esc(r.error.message)}`)}if(c.action==='restore'){if(!ownerOnly(user))return denied(chat);const r=backupApi.restore(user,c.payload.file);audit({action:'restore',target:c.payload.file});return send(chat,r.success?'♻️ Backup restored. Restart the bot to fully reload every in-memory component.':`❌ ${esc(r.error)}`)}if(c.action==='deleteMessage'){const r=await registry.execute('deleteMessage',{userId:user,chatId:c.payload.chatId,messageId:c.payload.messageId});return send(chat,r.success?'🗑️ Message deleted successfully.':`❌ ${esc(r.error.message)}`)}if(c.action==='updateGroupDescription'){const r=await registry.execute('updateGroupDescription',{userId:user,chatId:c.payload.chatId,description:c.payload.description});return send(chat,r.success?'✏️ Group description updated successfully.':`❌ ${esc(r.error.message)}`)}if(c.action==='setAdminRole'){const r=await registry.execute('setAdminRole',{userId:user,...c.payload});return send(chat,r.success?(c.payload.promoted?'👑 User promoted to admin successfully.':'👤 Admin rights removed successfully.'):`❌ ${esc(r.error.message)}`)}if(c.action==='lock'||c.action==='unlock'){const r=await registry.execute('lockGroup',{userId:user,chatId:c.payload.chatId,locked:c.action==='lock'});audit({action:c.action,target:String(c.payload.chatId)});return send(chat,r.success?`✅ Group ${c.action==='lock'?'locked':'unlocked'}.`:`❌ ${esc(r.error.message)}`)}return send(chat,'❌ Unknown confirmation.');}
 
  bot.onText(/^\/(?:aria|owner|menu)$/i,m=>ownerOnly(m.from.id)?send(m.chat.id,'🌸 <b>MISS ARIA — TELEGRAM OWNER COMMAND CENTER</b>\n\nAI control • groups • moderation • scheduler • analytics • security', {reply_markup:menu()}):denied(m.chat.id));
  bot.onText(/^\/status$/i,m=>ownerOnly(m.from.id)?send(m.chat.id,'🌸 <b>Miss Aria</b> 🟢 ONLINE\nTelegram tools: 🟢\nScheduler: 🟢\nAuto-Mod: 🟢'):denied(m.chat.id));
@@ -115,7 +115,7 @@ Automatic moderation is paused for this group.</blockquote>`;
  bot.onText(/^\/help$/i,m=>send(m.chat.id,'<b>🌸 MISS ARIA OWNER CENTER</b>\n\n/aria — open control center\n/groups — verified groups\n/access — groups you are authorized to control\n/tasks — scheduler\n/stats — analytics\n/diagnostics — system health\n/restart — restart with confirmation\n\nNatural language is supported for group management, moderation, messaging, tasks, auto-mod, emergency mode and memory.',{reply_markup:menu()}));
  bot.onText(/^\/restart$/i,m=>ownerOnly(m.from.id)?confirm(m.chat.id,m.from.id,'restart',{},'Restart the current Node.js process?'):denied(m.chat.id));
 
- bot.on('callback_query',async q=>{const d=String(q.data||'');if(d==='aria_continue_start'){await bot.answerCallbackQuery(q.id).catch(()=>{});const chat=q.message?.chat?.id||q.from.id;return bot.sendMessage(chat,'/start').catch(()=>{});}if(!d.startsWith('aria_'))return;await bot.answerCallbackQuery(q.id).catch(()=>{});const user=q.from.id,chat=q.message?.chat?.id||user;if(!ownerOnly(user))return denied(chat);try{
+ bot.on('callback_query',async q=>{const d=String(q.data||'');if(d==='aria_continue_start'){await bot.answerCallbackQuery(q.id).catch(()=>{});const chat=q.message?.chat?.id||q.from.id;return bot.sendMessage(chat,'/start').catch(()=>{});}if(!d.startsWith('aria_'))return;await bot.answerCallbackQuery(q.id).catch(()=>{});const user=q.from.id,chat=q.message?.chat?.id||user;const isConfirmation=d.startsWith('aria_confirm_');if(!ownerOnly(user)&&!isConfirmation)return denied(chat);try{
   if(d==='aria_intel')return send(chat,'🔎 <b>Aria Intelligence Hub</b>\n\nCommands: <code>Aria, health Zuno</code> · <code>Aria, profile Zuno</code> · <code>Aria, search @john</code> · <code>Aria, incidents</code> · <code>Aria, simulate lock Zuno</code>');
   if(d==='aria_incidents')return send(chat,'🚨 <b>Incident Center</b>\n\n'+(intelligence.incidents(user).data.map(x=>`• ${esc(x.at)} — <b>${esc(x.type||x.action||'incident')}</b> — ${esc(x.detail||x.target||'')}`).join('\n')||'No incidents recorded.'));
   if(d==='aria_groups')return groups(chat,user);if(d==='aria_moderation')return moderation(chat,user);if(d==='aria_tasks')return tasks(chat,user);if(d==='aria_stats')return statsPage(chat,user);if(d==='aria_diag')return diagnostics(chat,user);if(d==='aria_audit')return auditPage(chat,user);if(d==='aria_automod')return autoPage(chat,user);if(d==='aria_security')return security(chat,user);if(d==='aria_emergency')return emergency(chat,user);if(d==='aria_backup')return backupPage(chat,user);if(d==='aria_memory')return memoryPage(chat,user);
@@ -168,7 +168,7 @@ const r=await aiOps.undo(user);return send(chat,r.success?'↩️ <b>Last suppor
   const requester=String(m.from?.id||'');
   const isOwnerRequest=ownerOnly(requester);
   const groupChat=!!m.chat&&isGroup(m.chat);
-  const allowedControllerText=/\b(?:lock|unlock|anti[- ]?link|auto[- ]?mod|mute|unmute|warn|ban|kick|unban|promote|demote|rename|send|message|health|profile|admins|admin|simulate|raid|protection|clean|spam)\b/i.test(m.text.replace(/^@\w+\s*/,''));
+  const allowedControllerText=/\b(?:lock|unlock|anti[- ]?link|auto[- ]?mod|mute|unmute|warn|ban|kick|unban|promote|demote|rename|send|message|health|profile|admins|admin|simulate|raid|protection|clean|cleanup|spam|report|activity|summary|summarize|who|keeps|flood|blocked|warnings|warning|suspicious|user|him|her|them|why|translate|explain|rewrite)\b/i.test(m.text.replace(/^@\w+\s*/,''));
   if(!isOwnerRequest&&!allowedControllerText)return;
   if(!isOwnerRequest&&groupChat){const gate=await access.canControl(requester,m.chat.id);if(!gate.ok)return send(m.chat.id,`🔒 <b>Group control denied.</b>\n\n${esc(gate.message)}`);}
   if(!isOwnerRequest&&!groupChat&&/^\s*(?:aria[, :.-]*)?(?:what should i do|incidents|show|search|remember|restart|backup|create|schedule|lock every|unlock every)/i.test(m.text))return send(m.chat.id,'🔒 <b>Group-admin control only.</b>\n\nIn DM, name the Telegram group you administer and where Miss Aria is an admin.');
@@ -179,6 +179,43 @@ const r=await aiOps.undo(user);return send(chat,r.success?'↩️ <b>Last suppor
   try{
    // Extra conversational aliases: speak naturally instead of memorizing commands.
    const natural=text.replace(/[!?.,]+$/,'').trim();
+   // Conversational context: after Aria identifies a user/group, follow-ups
+   // like "remove him", "mute her", or "show his activity" can reuse
+   // the last safely resolved target instead of requiring the ID again.
+   const ctx=aiOps.context(user)||{};
+   const contextualTarget=ctx.lastUserId ? String(ctx.lastUserId) : null;
+   const contextualGroup=ctx.lastGroupId ? {id:String(ctx.lastGroupId),title:ctx.lastGroupTitle||String(ctx.lastGroupId)} : null;
+   const rememberResolved=(gs,target,action)=>aiOps.rememberContext(user,{lastGroupId:gs?.id||ctx.lastGroupId,lastGroupTitle:gs?.title||ctx.lastGroupTitle,lastUserId:target||ctx.lastUserId,lastAction:action});
+
+   // Natural group report / activity dashboard.
+   let reportMatch=natural.match(/^(?:give me|show me|show|send me)?\s*(?:the\s+)?(?:daily\s+)?(?:group\s+)?(?:report|activity report|summary|activity)\s*(?:for|in|of)?\s*(.+)?$/i);
+   if(reportMatch){
+     const phrase=String(reportMatch[1]||'').trim();
+     const gs=phrase?await findOneGroup(user,phrase,m.chat):contextualGroup;
+     if(!gs)return send(chat,'❌ Tell me which group, for example: <code>Aria, give me the activity report for Zuno</code>.');
+     const a=analytics.summary(); const g=(a.groups||[]).find(x=>String(x.id)===String(gs.id))||{messages:0,uniqueUsers:0};
+     const sec=await securityIntel.health(user,gs.id); const sp=await securityIntel.topSpam(user,gs.id,5);
+     const d=sec.success?sec.data:null;
+     rememberResolved(gs,null,'groupReport');
+     return send(chat,`📊 <b>Group Report — ${esc(gs.title)}</b>\n\n💬 Messages tracked: <b>${g.messages||0}</b>\n👥 Active users tracked: <b>${g.uniqueUsers||0}</b>\n🛡 Security risk: <b>${d?d.risk+'/100':'—'}</b>\n🚨 Incidents: <b>${d?d.incidents:0}</b>\n🔗 Anti-Link: ${state.chatSettings?.[String(gs.id)]?.lockLinks?'🟢 ON':'⚪ OFF'}\n🤖 Auto-Mod: ${state.ariaAutoMod?.[String(gs.id)]?.enabled?'🟢 ON':'⚪ OFF'}\n\n${sp.success&&sp.data.length?`🔥 Top spammer: <b>${esc(sp.data[0].name||'Unknown')}</b> — score <b>${sp.data[0].spamScore}</b>`:'✅ No scored spam activity yet.'}`);
+   }
+
+   // Context-aware user follow-ups: "who is this user?", "show his activity",
+   // and similar requests use a replied-to/mentioned user when available.
+   if(/^(?:who is|show|give me|tell me).*(?:this user|him|her|them)(?:'s)?(?:\s+(?:activity|profile|warnings|spam|history))?$/i.test(natural) && contextualTarget){
+     const uid=String(contextualTarget); const entry=Object.values(state.ariaUserDirectory||{}).find(x=>String(x.id)===uid)||{};
+     const groups=Object.entries(state.ariaSpamScores||{}).filter(([,v])=>v?.[uid]).map(([gid,v])=>({gid,row:v[uid]}));
+     const top=groups.sort((a,b)=>(b.row.spamScore||0)-(a.row.spamScore||0))[0];
+     return send(chat,`👤 <b>User Profile</b>\n\nName: <b>${esc(entry.name||top?.row?.name||'Unknown user')}</b>${entry.username||top?.row?.username?`\nUsername: @${esc(entry.username||top.row.username)}`:''}\nTelegram ID: <code>${esc(uid)}</code>\nMessages tracked: <b>${top?.row?.messages||0}</b>\nSpam score: <b>${top?.row?.spamScore||0}</b>\nFlagged messages: <b>${top?.row?.spamMessages||0}</b>\n\n<i>Scores are based only on activity Aria has actually observed.</i>`);
+   }
+
+   // Natural "who keeps spamming?" / "who is suspicious?" aliases.
+   let whoMatch=natural.match(/^(?:who|which user|who keeps)\s+(?:is\s+)?(?:the\s+)?(?:spamming|flooding|causing spam|being suspicious|looks suspicious)(?:\s+(?:in|on|from)\s+(.+))?$/i);
+   if(whoMatch){const gs=await findOneGroup(user,whoMatch[1],m.chat);if(!gs)return send(chat,'❌ I could not resolve that group.');const r=await securityIntel.topSpam(user,gs.id,5);if(!r.success)return send(chat,`❌ ${esc(r.error)}`);if(!r.data.length)return send(chat,`🧹 I have no scored spam activity for <b>${esc(gs.title)}</b> yet.`);rememberResolved(gs,r.data[0].userId,'spamAnalysis');return send(chat,`🧹 <b>Spam activity — ${esc(gs.title)}</b>\n\n${r.data.map((x,i)=>`${i+1}. <b>${esc(x.name||'Unknown')}</b>${x.username?` (@${esc(x.username)})`:''} — score <b>${x.spamScore}</b>, flagged <b>${x.spamMessages}</b> times`).join('\n')}\n\n<i>This is a risk ranking, not proof of malicious intent.</i>`);}
+
+   // Smart cleanup preview. Actual deletion remains explicit/confirmed.
+   let cleanMatch=natural.match(/^(?:clean|cleanup)\s+(?:the\s+)?(?:spam|flood|scam)\s+(?:messages?\s+)?(?:in|from)\s+(.+)$/i);
+   if(cleanMatch){const gs=await findOneGroup(user,cleanMatch[1],m.chat);if(!gs)return send(chat,'❌ Group not found.');return send(chat,`🧹 <b>Cleanup ready — ${esc(gs.title)}</b>\n\nI can remove specific spam messages, but Telegram only allows Aria to delete messages it can identify. Reply to a message and say <code>Aria, delete this message</code> for a confirmed deletion.`);}
    let nm=natural.match(/^(?:protect|secure|guard|watch|shield)\s+(.+?)(?:\s+group)?$/i);
    if(nm){const gs=await findOneGroup(user,nm[1],m.chat);if(gs){const r=await autoMod.configure(user,gs.id,{enabled:true});audit({action:'autoMod',target:String(gs.id),detail:'true:natural-protect'});if(r.success)return autoModSuccess(chat,gs.title,true);return send(chat,`❌ ${esc(r.error)}`);}}
    nm=natural.match(/^(?:stop|disable|pause|turn off|switch off)\s+(?:auto[- ]?mod|automatic moderation|spam protection)(?:\s+in\s+(.+))?$/i);
@@ -287,8 +324,21 @@ const r=await aiOps.undo(user);return send(chat,r.success?'↩️ <b>Last suppor
     if(intent.type==='tasks') return tasks(chat,user);
     if(intent.type==='diagnostics') return diagnostics(chat,user);
     if(intent.type==='stats') return statsPage(chat,user);
+    if(intent.type==='groupReport'){
+      const gs=intent.group?await findOneGroup(user,intent.group,m.chat):contextualGroup;
+      if(!gs)return send(chat,'❌ Tell me which group, for example: <code>Aria, give me the activity report for Zuno</code>.');
+      const a=analytics.summary(); const g=(a.groups||[]).find(x=>String(x.id)===String(gs.id))||{messages:0,uniqueUsers:0};
+      const sec=await securityIntel.health(user,gs.id); const sp=await securityIntel.topSpam(user,gs.id,5); const d=sec.success?sec.data:null;
+      rememberResolved(gs,null,'groupReport');
+      return send(chat,`📊 <b>Group Report — ${esc(gs.title)}</b>\n\n💬 Messages tracked: <b>${g.messages||0}</b>\n👥 Active users tracked: <b>${g.uniqueUsers||0}</b>\n🛡 Security risk: <b>${d?d.risk+'/100':'—'}</b>\n🚨 Incidents: <b>${d?d.incidents:0}</b>\n🔗 Anti-Link: ${state.chatSettings?.[String(gs.id)]?.lockLinks?'🟢 ON':'⚪ OFF'}\n🤖 Auto-Mod: ${state.ariaAutoMod?.[String(gs.id)]?.enabled?'🟢 ON':'⚪ OFF'}\n\n${sp.success&&sp.data.length?`🔥 Top spammer: <b>${esc(sp.data[0].name||'Unknown')}</b> — score <b>${sp.data[0].spamScore}</b>`:'✅ No scored spam activity yet.'}`);
+    }
+    if(intent.type==='userContext' && contextualTarget){
+      const uid=String(contextualTarget); const entry=Object.values(state.ariaUserDirectory||{}).find(x=>String(x.id)===uid)||{};
+      let best=null; for(const v of Object.values(state.ariaSpamScores||{})){if(v?.[uid] && (!best || v[uid].spamScore>best.spamScore))best=v[uid];}
+      return send(chat,`👤 <b>User Context</b>\n\nName: <b>${esc(entry.name||best?.name||'Unknown user')}</b>${entry.username||best?.username?`\nUsername: @${esc(entry.username||best.username)}`:''}\nTelegram ID: <code>${esc(uid)}</code>\nMessages tracked: <b>${best?.messages||0}</b>\nSpam score: <b>${best?.spamScore||0}</b>\nFlagged messages: <b>${best?.spamMessages||0}</b>`);
+    }
     if(intent.type==='spamTop'){
-      const gs=await findOneGroup(user,intent.group,m.chat);
+      const gs=intent.group?await findOneGroup(user,intent.group,m.chat):contextualGroup;
       if(!gs)return send(chat,'❌ I could not uniquely resolve that Telegram group. Try <code>Aria, show my groups</code>.');
       const r=await securityIntel.topSpam(user,gs.id,10);
       if(!r.success)return send(chat,`❌ ${esc(r.error)}`);
@@ -301,7 +351,14 @@ const r=await aiOps.undo(user);return send(chat,r.success?'↩️ <b>Last suppor
     if(intent.type==='backup'){const r=backupApi.create(user);return r.success?successMessage(chat,'Backup Created',`💾 Backup <code>${esc(r.file)}</code> was created successfully.<br>Size: ${Math.round(r.bytes/1024)} KB`):send(chat,`❌ ${esc(r.error)}`)}
     if(intent.type==='memoryAdd'){const r=memory.add(user,intent.text);return r.success?successMessage(chat,'Memory Saved','🧠 Aria saved that information successfully.'):send(chat,`❌ ${esc(r.error)}`)}
     if(intent.type==='sendMessage'){const gs=await findOneGroup(user,intent.group,m.chat);if(!gs)return send(chat,'❌ I could not uniquely resolve that Telegram group. Try <code>Aria, show my groups</code>.');const r=await registry.execute('sendMessage',{userId:user,chatId:gs.id,text:intent.text});aiOps.rememberContext(user,{lastGroupId:gs.id,lastGroupTitle:gs.title,lastAction:'sendMessage'});aiBrain.journal(user,{action:'sendMessage',chatId:gs.id,groupTitle:gs.title,detail:intent.text});return r.success?successMessage(chat,'Message Sent',`📨 Your message was sent successfully to <b>${esc(gs.title)}</b>.`):send(chat,`❌ ${esc(r.error.message)}`)}
-    if(intent.type==='securityHealth'){
+    if(intent.type==='raidProtection'){
+     const gs=await findOneGroup(user,intent.group,m.chat);
+     if(!gs)return send(chat,'❌ I could not uniquely resolve that Telegram group.');
+     const r=await autoMod.configure(user,gs.id,{raid:intent.enabled});
+     audit({action:'raidProtection',target:String(gs.id),detail:String(intent.enabled)});
+     return r.success?successMessage(chat,`Raid Protection ${intent.enabled?'Enabled':'Disabled'}`,`🚨 Raid protection is now <b>${intent.enabled?'ON':'OFF'}</b> in <b>${esc(gs.title)}</b>.`):send(chat,`❌ ${esc(r.error)}`);
+   }
+   if(intent.type==='securityHealth'){
       const gs=await findOneGroup(user,intent.group||'this group',m.chat);
       if(!gs)return send(chat,'❌ I could not resolve that Telegram group. Say <code>show security status in Zuno</code>.');
       const r=await securityIntel.health(user,gs.id);
@@ -315,7 +372,8 @@ const r=await aiOps.undo(user);return send(chat,r.success?'↩️ <b>Last suppor
     if(intent.type==='emergency') return confirm(chat,user,'emergency',{enabled:intent.enabled},`${intent.enabled?'Lock':'Unlock'} every verified admin group?`);
     if(intent.type==='restart') return confirm(chat,user,'restart',{},'Restart the current Node.js process?');
     if(intent.type==='moderation'){
-      const gs=await findOneGroup(user,intent.group,m.chat); if(!gs)return send(chat,'❌ I could not uniquely resolve that Telegram group.');
+      const gs=intent.group?await findOneGroup(user,intent.group,m.chat):contextualGroup; if(!gs)return send(chat,'❌ I could not uniquely resolve that Telegram group.');
+      if(!intent.target && contextualTarget) intent.target=contextualTarget;
       if(!intent.target) return send(chat,`👤 Reply to the user you want to ${intent.action==='kick'?'remove':intent.action}, or tag them with a Telegram mention. You can also provide their @username if Aria has already seen that user.`);
       let targetId=String(intent.target).replace(/^@/,'');
       if(/^\d+$/.test(targetId)) targetId=Number(targetId);
@@ -331,7 +389,7 @@ Duration: ${Math.round(intent.durationMs/60000)} minutes`:''}`;
       if(['ban','kick'].includes(action)) return confirm(chat,user,action,{chatId:gs.id,targetUserId:Number(targetId),reason:intent.reason||'AI moderation request',durationMs:intent.durationMs},label+'\n\nAI recommendation requires your confirmation.');
       const tool=action==='warn'?'warn':'moderate';
       const r=tool==='warn'?await registry.execute('warn',{userId:user,chatId:gs.id,targetUserId:Number(targetId),reason:intent.reason}):await registry.execute('moderate',{userId:user,chatId:gs.id,targetUserId:Number(targetId),action,durationMs:intent.durationMs,reason:intent.reason});
-      aiBrain.journal(user,{action,target:`${gs.id}:${targetId}`,chatId:gs.id,groupTitle:gs.title,targetUserId:targetId,detail:intent.reason||''});if(r.success)actionJournal.record(user,{action,tool,chatId:gs.id,target:`${gs.id}:${targetId}`,detail:intent.reason||'',args:{chatId:gs.id,targetUserId:Number(targetId),action,durationMs:intent.durationMs,reason:intent.reason}});
+      rememberResolved(gs,targetId,action); aiBrain.journal(user,{action,target:`${gs.id}:${targetId}`,chatId:gs.id,groupTitle:gs.title,targetUserId:targetId,detail:intent.reason||''});if(r.success)actionJournal.record(user,{action,tool,chatId:gs.id,target:`${gs.id}:${targetId}`,detail:intent.reason||'',args:{chatId:gs.id,targetUserId:Number(targetId),action,durationMs:intent.durationMs,reason:intent.reason}});
       return send(chat,r.success?`🤖 <b>AI control action completed</b>
 
 ${label}`:`❌ ${esc(r.error.message)}`);
@@ -344,6 +402,12 @@ ${label}`:`❌ ${esc(r.error.message)}`);
    if(/^(?:run )?diagnostics$/i.test(text))return diagnostics(chat,user);
    if(/^show (?:the )?audit$/i.test(text))return auditPage(chat,user);
    if(/^show (?:my )?memory$/i.test(text))return memoryPage(chat,user);
+   mm=text.match(/^(?:pin|pin message)\s+(?:message\s+)?(\d+)\s+(?:in|on)\s+(.+)$/i);if(mm){const gs=await findOneGroup(user,mm[2],m.chat);if(!gs)return send(chat,'❌ Group not found.');const r=await registry.execute('pinMessage',{userId:user,chatId:gs.id,messageId:Number(mm[1])});return r.success?successMessage(chat,'Message Pinned',`📌 Message <code>${mm[1]}</code> was pinned in <b>${esc(gs.title)}</b>.`):send(chat,`❌ ${esc(r.error.message)}`)}
+   mm=text.match(/^(?:unpin|unpin message)\s+(?:message\s+)?(\d+)\s+(?:in|on)\s+(.+)$/i);if(mm){const gs=await findOneGroup(user,mm[2],m.chat);if(!gs)return send(chat,'❌ Group not found.');const r=await registry.execute('unpinMessage',{userId:user,chatId:gs.id,messageId:Number(mm[1])});return r.success?successMessage(chat,'Message Unpinned',`📌 Message <code>${mm[1]}</code> was unpinned in <b>${esc(gs.title)}</b>.`):send(chat,`❌ ${esc(r.error.message)}`)}
+   mm=text.match(/^(?:delete|remove)\s+(?:message\s+)?(\d+)\s+(?:from|in)\s+(.+)$/i);if(mm){const gs=await findOneGroup(user,mm[2],m.chat);if(!gs)return send(chat,'❌ Group not found.');return confirm(chat,user,'deleteMessage',{chatId:gs.id,messageId:Number(mm[1])},`Delete message <code>${mm[1]}</code> from <b>${esc(gs.title)}</b>?`)}
+   mm=text.match(/^(?:change|set|update)\s+(?:the\s+)?(?:group\s+)?description\s+(?:in|for)\s+(.+?)\s+to\s+[“"](.+?)[”"]$/i);if(mm){const gs=await findOneGroup(user,mm[1],m.chat);if(!gs)return send(chat,'❌ Group not found.');return confirm(chat,user,'updateGroupDescription',{chatId:gs.id,description:mm[2]},`Change the description of <b>${esc(gs.title)}</b>?`)}
+   mm=text.match(/^(?:promote|make)\s+(\d+)\s+(?:an?\s+)?admin\s+(?:in|of)\s+(.+)$/i);if(mm){const gs=await findOneGroup(user,mm[2],m.chat);if(!gs)return send(chat,'❌ Group not found.');return confirm(chat,user,'setAdminRole',{chatId:gs.id,targetUserId:Number(mm[1]),promoted:true},`Promote <code>${mm[1]}</code> to admin in <b>${esc(gs.title)}</b>?`)}
+   mm=text.match(/^demote\s+(\d+)\s+(?:from\s+)?admin(?:\s+(?:in|of))?\s+(.+)$/i);if(mm){const gs=await findOneGroup(user,mm[2],m.chat);if(!gs)return send(chat,'❌ Group not found.');return confirm(chat,user,'setAdminRole',{chatId:gs.id,targetUserId:Number(mm[1]),promoted:false},`Remove admin rights from <code>${mm[1]}</code> in <b>${esc(gs.title)}</b>?`)}
    let mm=text.match(/^send\s+["“](.+?)["”]\s+to\s+(.+)$/i);if(mm){const gs=await findOneGroup(user,mm[2],m.chat);if(!gs)return send(chat,'❌ Group not found.');const r=await registry.execute('sendMessage',{userId:user,chatId:gs.id,text:mm[1]});audit({action:'sendMessage',target:String(gs.id)});return r.success?successMessage(chat,'Message Sent',`📨 Your message was sent successfully to <b>${esc(gs.title)}</b>.`):send(chat,`❌ ${esc(r.error.message)}`)}
    mm=text.match(/^(lock|unlock)\s+(.+)$/i);if(mm){const gs=await findOneGroup(user,mm[2],m.chat);if(!gs)return send(chat,'❌ Group not found.');return confirm(chat,user,mm[1].toLowerCase(),{chatId:gs.id},`${mm[1].toUpperCase()} <b>${esc(gs.title)}</b>?`)}
    mm=text.match(/^turn\s+anti[- ]link\s+(on|off)\s+in\s+(.+)$/i);if(mm){const gs=await findOneGroup(user,mm[2],m.chat);if(!gs)return send(chat,'❌ Group not found.');const r=await registry.execute('antiLink',{userId:user,chatId:gs.id,enabled:mm[1].toLowerCase()==='on'});audit({action:'antiLink',target:String(gs.id),detail:mm[1]});return r.success?successMessage(chat,`Anti-Link ${mm[1].toUpperCase()}`,`🔗 Anti-link is <b>${mm[1].toUpperCase()}</b> in <b>${esc(gs.title)}</b>.`):send(chat,`❌ ${esc(r.error.message)}`)}

@@ -657,33 +657,32 @@ function generateCode() {
 }
 const nodemailer = require("nodemailer");
 
-const EMAIL_USER = String(process.env.EMAIL_USER || process.env.GMAIL_USER || "").trim();
-const EMAIL_PASS = String(process.env.EMAIL_PASS || process.env.GMAIL_APP_PASSWORD || "").trim();
+const EMAIL_USER = String(process.env.EMAIL_USER || process.env.GMAIL_USER || "").trim().toLowerCase();
+const EMAIL_PASS = String(process.env.EMAIL_PASS || process.env.GMAIL_APP_PASSWORD || "")
+    .replace(/\s+/g, "")
+    .trim();
 
 const smtpOptions = {
-    connectionTimeout: 20000,
-    greetingTimeout: 15000,
-    socketTimeout: 30000,
     auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+    connectionTimeout: 30000,
+    greetingTimeout: 30000,
+    socketTimeout: 60000,
     tls: { minVersion: "TLSv1.2", servername: "smtp.gmail.com" }
 };
 
-// Gmail supports both STARTTLS (587) and implicit TLS (465). Some hosting
-// networks are more reliable with one route than the other, so verification
-// email sending can fall back to the second transport on connection errors.
+// Use Gmail's native service configuration first, then fall back to explicit
+// SMTP ports. App passwords are accepted with the spaces removed above.
 const transporter = nodemailer.createTransport({
     ...smtpOptions,
-    host: "smtp.gmail.com",
-    port: 587,
-    secure: false,
-    requireTLS: true
+    service: "gmail",
+    secure: false
 });
+
 const transporter465 = nodemailer.createTransport({
     ...smtpOptions,
     host: "smtp.gmail.com",
     port: 465,
-    secure: true,
-    requireTLS: false
+    secure: true
 });
 
 if (!EMAIL_USER || !EMAIL_PASS) {
@@ -691,8 +690,9 @@ if (!EMAIL_USER || !EMAIL_PASS) {
 } else {
     transporter.verify()
         .then(() => console.log(`📧 Gmail SMTP ready for ${EMAIL_USER}`))
-        .catch(err => console.error("❌ Gmail SMTP connection failed:", err.message));
+        .catch(err => console.error("❌ Gmail SMTP verification failed:", err.code || "", err.responseCode || "", err.message || err));
 }
+
 function clearPending(userId) {
   getUser(userId).pending = null;
   saveStore();
@@ -1967,16 +1967,22 @@ If you didn't request this verification, you can safely ignore this email.
         try {
             info = await transporter.sendMail(mail);
         } catch (firstError) {
-            console.error(`[EMAIL] Gmail SMTP 587 failed: ${firstError?.code || 'UNKNOWN'} ${firstError?.message || firstError}`);
-            // Only fall back when the first SMTP route failed. Authentication
-            // errors are also logged clearly; the second route may still work
-            // with the same App Password.
-            info = await transporter465.sendMail(mail);
-            console.log('[EMAIL] Gmail SMTP 465 fallback succeeded.');
+            console.error(
+                `[EMAIL] Gmail primary transport failed: ${firstError?.code || "UNKNOWN"} ${firstError?.responseCode || ""} ${firstError?.message || firstError}`
+            );
+
+            try {
+                info = await transporter465.sendMail(mail);
+                console.log("[EMAIL] Gmail 465 fallback succeeded.");
+            } catch (secondError) {
+                console.error(
+                    `[EMAIL] Gmail fallback transport failed: ${secondError?.code || "UNKNOWN"} ${secondError?.responseCode || ""} ${secondError?.message || secondError}`
+                );
+                throw secondError;
+            }
         }
 
-        console.log(`✅ Verification email accepted by SMTP for ${email} (${info?.messageId || 'no-message-id'})`);
-
+        console.log(`✅ Verification email accepted by SMTP for ${email} (${info?.messageId || "no-message-id"})`);
         return true;
 
     } catch (error) {

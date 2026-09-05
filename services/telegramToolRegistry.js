@@ -222,6 +222,14 @@ function createRegistry({ bot, state, saveStore, ownerId, knownGroups, accessCon
       else await bot.unpinAllChatMessages(chatId);
       return ok({ messageId: messageId ? Number(messageId) : null });
     },
+
+    deleteMessage: async ({ userId, chatId, messageId }) => {
+      await requireGroup(chatId, userId, true);
+      const mid = Number(messageId);
+      if (!Number.isSafeInteger(mid) || mid <= 0) throw Object.assign(new Error('Invalid Telegram message ID.'), { code: 'INVALID_MESSAGE_ID' });
+      await bot.deleteMessage(String(chatId), mid);
+      return ok({ chatId: String(chatId), messageId: mid });
+    },
   };
 
   async function execute(name, params = {}) {

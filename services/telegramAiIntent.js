@@ -96,8 +96,38 @@ function parse(text) {
   if (!raw) return { type: 'intentMeta', intentClass: 'UNKNOWN', original: '' };
   const lower = raw.toLowerCase();
 
+  // Expanded natural-word control aliases. These deliberately map to the
+  // existing safe intent types so permissions/confirmation stay unchanged.
+  let nm = raw.match(/^(?:keep|make|set|put)\s+(.+?)\s+(?:admins?|admin only)\s*(?:only)?$/i);
+  if (nm) return { type: 'groupPermission', action: 'lock', group: clean(nm[1]) };
+  nm = raw.match(/^(?:let|allow)\s+(?:everyone|all members?|members?)\s+(?:talk|chat|send messages?)\s+(?:in|on|to)\s+(.+)$/i);
+  if (nm) return { type: 'groupPermission', action: 'unlock', group: clean(nm[1]) };
+
+  nm = raw.match(/^(?:turn|switch)\s+(?:the\s+)?links?\s+(on|off)\s+(?:in|for|on)\s+(.+)$/i);
+  if (nm) return { type: 'antiLink', enabled: nm[1].toLowerCase() === 'on', group: clean(nm[2]) };
+  nm = raw.match(/^(?:stop|block|disable|remove)\s+(?:links?|link posting)(?:\s+(?:in|from|for|on)\s+)(.+)$/i);
+  if (nm) return { type: 'antiLink', enabled: true, group: clean(nm[1]) };
+
+  nm = raw.match(/^(?:show|give me|tell me)\s+(?:the\s+)?(?:admins?|administrators?)(?:\s+(?:in|for|of)\s+)(.+)$/i);
+  if (nm) return { type: 'securityHealth', group: clean(nm[1]) };
+  nm = raw.match(/^(?:check|show|give me)\s+(?:the\s+)?(?:safety|security|protection)\s+(?:of|for|in)\s+(.+)$/i);
+  if (nm) return { type: 'securityHealth', group: clean(nm[1]) };
+  nm = raw.match(/^(?:who|which)\s+(?:is|are)\s+(?:spamming|flooding|causing\s+spam)(?:\s+(?:in|on|from)\s+)(.+?)(?:\?)?$/i);
+  if (nm) return { type: 'spamTop', group: clean(nm[1]) };
+
+  nm = raw.match(/^(?:start|enable|activate|turn on|switch on)\s+(?:raid protection|raid guard|raid mode)(?:\s+(?:in|for|on)\s+)(.+)$/i);
+  if (nm) return { type: 'raidProtection', enabled: true, group: clean(nm[1]) };
+  nm = raw.match(/^(?:stop|disable|deactivate|turn off|switch off)\s+(?:raid protection|raid guard|raid mode)(?:\s+(?:in|for|on)\s+)(.+)$/i);
+  if (nm) return { type: 'raidProtection', enabled: false, group: clean(nm[1]) };
+
+  nm = raw.match(/^(?:send|post|tell)\s+(.+?)\s+(?:to|in|into)\s+(.+)$/i);
+  if (nm && !/^['“]/.test(nm[1])) return { type: 'sendMessage', text: clean(nm[1], 4000), group: clean(nm[2]) };
+
+  nm = raw.match(/^(?:show|give me|list|display)\s+(?:my\s+)?(?:group|chat)\s+(?:list|groups?|chats?)$/i);
+  if (nm) return { type: 'groups' };
+
   // Broad natural-language security/moderation aliases.
-  let nm = raw.match(/^(?:protect|secure|guard|shield|watch)\s+(.+?)(?:\s+group)?$/i);
+  nm = raw.match(/^(?:protect|secure|guard|shield|watch)\s+(.+?)(?:\s+group)?$/i);
   if (nm) return { type: 'autoMod', enabled: true, group: clean(nm[1]), feature: 'auto-mod' };
   nm = raw.match(/^(?:disable|pause|stop|deactivate|switch off)\s+(?:auto[- ]?mod|automatic moderation|spam protection)(?:\s+(?:in|on|for)\s+)(.+)$/i);
   if (nm) return { type: 'autoMod', enabled: false, group: clean(nm[1]), feature: 'auto-mod' };
@@ -147,6 +177,17 @@ function parse(text) {
     const durationMs = action === 'mute' || action === 'ban' ? parseDuration(tail) : null;
     const reason = durationMs ? tail.replace(/^(?:for\s+)?\d+\s*(?:s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)\b/i, '').trim() : tail.replace(/^because\s+/i, '');
     return { type: 'moderation', action, target: null, targetRef: m[2].toLowerCase(), group: clean(m[3]), reason: clean(reason), durationMs, confidence: 'high' };
+  }
+
+  // Context-only follow-ups such as "remove him", "mute her for 10m".
+  // The owner center supplies the previously resolved group/user safely.
+  m = raw.match(/^(mute|ban|kick|warn|unmute|unban|remove)\s+(?:this\s+user|them|him|her)(?:\s+(?:for|because)\s+(.+))?$/i);
+  if (m) {
+    const action = m[1].toLowerCase() === 'remove' ? 'kick' : m[1].toLowerCase();
+    const tail = clean(m[2] || '');
+    const durationMs = action === 'mute' || action === 'ban' ? parseDuration(tail) : null;
+    const reason = durationMs ? tail.replace(/^(?:for\s+)?\d+\s*(?:s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)\b/i, '').trim() : tail.replace(/^because\s+/i, '');
+    return { type:'moderation', action, target:null, group:'', reason:clean(reason), durationMs, confidence:'high' };
   }
 
   // "ban john from zack", "mute john in zack"
