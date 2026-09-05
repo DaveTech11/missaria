@@ -37,6 +37,13 @@ function classify(text) {
     return { kind: 'CANCEL', text: raw };
   }
 
+  // Image capability questions are questions, not image-generation commands.
+  // Example: "can you generate an image?" asks whether Aria can do it.
+  // "generate an image of a cat" is an actual command.
+  if (/^(?:please\s+)?(?:can|could|would)\s+(?:you|u)\s+(?:please\s+)?(?:generate|create|make|draw|design|render)\s+(?:me\s+)?(?:an?\s+)?(?:image|picture|pic|photo|artwork|art|drawing)\b/i.test(lower)) {
+    return { kind: 'QUESTION', text: raw };
+  }
+
   // These are questions, not actions. In particular "can I ban..." must
   // never execute a ban.
   if (/^(?:what|why|how|when|where|who|which|is|are|am|do|does|did|will|would|should)\b.*\?*$/i.test(lower) ||
@@ -71,6 +78,13 @@ function parseDuration(s) {
 
 function parse(text) {
   const classification = classify(text);
+  // Security/analytics questions that should execute a read-only lookup
+  // instead of being sent to the generic AI question handler.
+  const spamQuery = clean(text).replace(/^@?aria\b[\s,;:.-]*/i, '').trim();
+  let sm = spamQuery.match(/^(?:who|which user|what user)\s+(?:is|are)\s+(?:causing|creating|sending)\s+(?:the\s+)?(?:most\s+)?spam(?:\s+(?:in|from|on))\s+(.+?)\??$/i);
+  if (sm) return { type: 'spamTop', group: clean(sm[1]) };
+  sm = spamQuery.match(/^(?:show|give me|list)\s+(?:the\s+)?(?:top|worst|most)\s+spam(?:mers)?(?:\s+(?:in|from|on))\s+(.+?)\??$/i);
+  if (sm) return { type: 'spamTop', group: clean(sm[1]) };
   if (classification.kind === 'QUESTION' ||
       classification.kind === 'CONFIRMATION' ||
       classification.kind === 'CANCEL' ||
@@ -81,6 +95,29 @@ function parse(text) {
   const raw = classification.text;
   if (!raw) return { type: 'intentMeta', intentClass: 'UNKNOWN', original: '' };
   const lower = raw.toLowerCase();
+
+  // Broad natural-language security/moderation aliases.
+  let nm = raw.match(/^(?:protect|secure|guard|shield|watch)\s+(.+?)(?:\s+group)?$/i);
+  if (nm) return { type: 'autoMod', enabled: true, group: clean(nm[1]), feature: 'auto-mod' };
+  nm = raw.match(/^(?:disable|pause|stop|deactivate|switch off)\s+(?:auto[- ]?mod|automatic moderation|spam protection)(?:\s+(?:in|on|for)\s+)(.+)$/i);
+  if (nm) return { type: 'autoMod', enabled: false, group: clean(nm[1]), feature: 'auto-mod' };
+  nm = raw.match(/^(?:enable|activate|start|switch on)\s+(?:auto[- ]?mod|automatic moderation|spam protection)(?:\s+(?:in|on|for)\s+)(.+)$/i);
+  if (nm) return { type: 'autoMod', enabled: true, group: clean(nm[1]), feature: 'auto-mod' };
+  nm = raw.match(/^(?:show|give me|tell me)\s+(?:the\s+)?(?:safety|security|protection)\s+(?:status|report)(?:\s+(?:in|for|of)\s+)(.+)$/i);
+  if (nm) return { type: 'securityHealth', group: clean(nm[1]) };
+  nm = raw.match(/^(?:who|which)\s+(?:is|are)\s+(?:spamming|flooding|causing spam)(?:\s+(?:in|on|from)\s+)(.+?)(?:\?)?$/i);
+  if (nm) return { type: 'spamTop', group: clean(nm[1]) };
+
+  nm = raw.match(/^(?:make|keep)\s+(.+?)\s+(?:safe|clean|protected)(?:\s+(?:from\s+)?(?:spam|abuse|raids?|bad actors?))?$/i);
+  if (nm) return { type: 'autoMod', enabled: true, group: clean(nm[1]), feature: 'auto-mod' };
+  nm = raw.match(/^(?:start|begin)\s+protecting\s+(.+)$/i);
+  if (nm) return { type: 'autoMod', enabled: true, group: clean(nm[1]), feature: 'auto-mod' };
+  nm = raw.match(/^(?:protect|secure|guard|watch)\s+(.+?)\s+(?:from\s+)?(?:spam|raids?|flooding)$/i);
+  if (nm) return { type: 'autoMod', enabled: true, group: clean(nm[1]), feature: 'anti-spam' };
+  nm = raw.match(/^(?:auto[- ]?mod|automoderation|moderation|spam protection)\s+(?:on|enable|enabled|start)(?:\s+(?:in|for|on)\s+)(.+)$/i);
+  if (nm) return { type: 'autoMod', enabled: true, group: clean(nm[1]), feature: 'auto-mod' };
+  nm = raw.match(/^(?:auto[- ]?mod|automoderation|moderation|spam protection)\s+(?:off|disable|disabled|stop)(?:\s+(?:in|for|on)\s+)(.+)$/i);
+  if (nm) return { type: 'autoMod', enabled: false, group: clean(nm[1]), feature: 'auto-mod' };
 
   // Conversational moderation:
   // "handle @john in Zuno — he's flooding the chat"
@@ -101,6 +138,17 @@ function parse(text) {
     return { type: 'moderation', action, target, group, reason, durationMs, confidence: action === 'mute' ? 'high' : 'medium' };
   }
 
+  // "remove this user from zack" / "kick them in zack" are resolved
+  // from the replied-to/tagged Telegram user by the owner center.
+  m = raw.match(/^(mute|ban|kick|warn|unmute|unban|remove)\s+(this\s+user|them|him|her)\s+(?:from|in|on)\s+(.+?)(?:\s+(?:for|because)\s+(.+))?$/i);
+  if (m) {
+    const action = m[1].toLowerCase() === 'remove' ? 'kick' : m[1].toLowerCase();
+    const tail = clean(m[4] || '');
+    const durationMs = action === 'mute' || action === 'ban' ? parseDuration(tail) : null;
+    const reason = durationMs ? tail.replace(/^(?:for\s+)?\d+\s*(?:s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)\b/i, '').trim() : tail.replace(/^because\s+/i, '');
+    return { type: 'moderation', action, target: null, targetRef: m[2].toLowerCase(), group: clean(m[3]), reason: clean(reason), durationMs, confidence: 'high' };
+  }
+
   // "ban john from zack", "mute john in zack"
   m = raw.match(/^(mute|ban|kick|warn|unmute|unban|remove)\s+(@?[A-Za-z0-9_]{2,64}|\d+)\s+(?:from|in|on)\s+(.+?)(?:\s+(?:for|because)\s+(.+))?$/i);
   if (m) {
@@ -115,6 +163,7 @@ function parse(text) {
 
   if (/^(?:check|run|do)\s+(?:a\s+)?(?:system\s+)?(?:health|diagnostic|diagnostics|self[- ]check)/i.test(lower)) return { type: 'diagnostics' };
   if (/^(?:show|give me|what(?:'s| is))\s+(?:my\s+)?(?:stats|statistics|activity|report)/i.test(lower)) return { type: 'stats' };
+  if (/^(?:(?:show|list)\s+(?:my\s+)?groups?|which|what)\s+(?:groups\s+)?(?:am\s+i|i\s+am)\s+admin\s+in\s*\??$/i.test(lower) || /^(?:which|what)\s+groups\s+(?:are\s+you|is\s+aria)\s+admin\s+in\s*\??$/i.test(lower)) return { type: 'groups' };
   if (/^(?:show|list)\s+(?:my\s+)?groups?$/i.test(lower)) return { type: 'groups' };
   if (/^(?:show|list)\s+(?:my\s+)?(?:tasks|reminders)$/i.test(lower)) return { type: 'tasks' };
   if (/^(?:show|list)\s+(?:the\s+)?audit(?:\s+log)?$/i.test(lower)) return { type: 'audit' };

@@ -6,6 +6,8 @@ const axios = require("axios");
 
 const PREXZY_URL = "https://prexzyapis.com/ai/text2img";
 const POLLINATIONS_URL = "https://image.pollinations.ai/prompt";
+const PIXAZO_URL = "https://gateway.pixazo.ai/flux-1-schnell/v1/getData";
+const PIXAZO_KEY = String(process.env.PIXAZO_API_KEY || process.env.PIXAZO_API_KEY_FLUX || "").trim();
 
 function cleanPrompt(value) {
   return String(value || "")
@@ -35,6 +37,12 @@ function extractNaturalImagePrompt(text) {
     .trim();
 
   return cleanPrompt(rest);
+}
+
+
+function isNaturalImageQuestion(text) {
+  const input = String(text || "").trim();
+  return /^(?:@?aria[\s,;:.-]*)?(?:please\s+)?(?:can|could|would)\s+(?:you|u)\s+(?:please\s+)?(?:generate|create|make|draw|design|render)\s+(?:me\s+)?(?:an?\s+)?(?:image|picture|pic|photo|artwork|art|drawing)\b.*\?*$/i.test(input);
 }
 
 function detectNaturalImageRequest(text) {
@@ -69,6 +77,40 @@ async function generateImage(prompt) {
 
   const errors = [];
 
+  // Pixazo FLUX 1 Schnell is the primary API when a key is configured.
+  // It returns a generated image URL directly and is documented as free during preview.
+  if (PIXAZO_KEY) {
+    try {
+      const response = await axios.post(PIXAZO_URL, {
+        prompt: clean,
+        num_steps: 4,
+        seed: Math.floor(Math.random() * 2147483647),
+        height: 1024,
+        width: 1024
+      }, {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache",
+          "Ocp-Apim-Subscription-Key": PIXAZO_KEY
+        },
+        timeout: 120000,
+        validateStatus: () => true
+      });
+
+      const data = response.data || {};
+      const imageUrl = data.output || data.image_url || data.url || data.media_url?.[0];
+      if (response.status >= 200 && response.status < 300 && imageUrl) {
+        const image = await requestImage(String(imageUrl), {}, 120000);
+        return { image, engine: "Pixazo FLUX 1 Schnell" };
+      }
+
+      throw new Error(data.error || data.message || `HTTP ${response.status}`);
+    } catch (err) {
+      errors.push(`Pixazo FLUX: ${err.message}`);
+      console.error("[IMAGE] Pixazo FLUX failed:", err.message);
+    }
+  }
+
   try {
     const image = await requestImage(
       PREXZY_URL,
@@ -102,6 +144,7 @@ async function generateImage(prompt) {
 
 module.exports = {
   detectNaturalImageRequest,
+  isNaturalImageQuestion,
   extractNaturalImagePrompt,
   generateImage
 };

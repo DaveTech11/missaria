@@ -6,6 +6,7 @@ function setup({ bot, state, saveStore, accessControl, audit }) {
   const windows = new Map();
   const joins = new Map();
   const notifyCooldown = new Map();
+  state.ariaSpamScores = state.ariaSpamScores || {};
 
   const admin = s => ['administrator','creator'].includes(s);
   const settings = id => {
@@ -41,6 +42,20 @@ function setup({ bot, state, saveStore, accessControl, audit }) {
     if(/free\s+(money|gift|crypto)|claim\s+now|verify\s+account|urgent\s+click/i.test(text)){score+=30;reasons.push('scam-like wording')}
     const repeated=w.slice(-12).filter(x=>x.text&&x.text===text).length; if(repeated>=4){score+=25;reasons.push('repeated message pattern')}
     score=Math.min(100,score);
+
+    // Keep a rolling, per-user spam score so Aria can answer read-only
+    // questions such as "who is causing the most spam in Zack?" using
+    // messages the bot actually observed. This does not expose or invent
+    // participants that Telegram has not delivered to the bot.
+    const userId=String(msg.from.id);
+    state.ariaSpamScores[id]=state.ariaSpamScores[id]||{};
+    const rowScore = Math.max(score, reasons.length ? Math.min(60, reasons.length * 15) : 0);
+    const bucket=state.ariaSpamScores[id][userId]||{userId,messages:0,spamScore:0,spamMessages:0,lastSeen:0,username:msg.from.username||null,name:[msg.from.first_name,msg.from.last_name].filter(Boolean).join(' ')};
+    bucket.messages++; bucket.lastSeen=now; bucket.username=msg.from.username||bucket.username; bucket.name=[msg.from.first_name,msg.from.last_name].filter(Boolean).join(' ')||bucket.name;
+    if(rowScore>0){bucket.spamMessages++; bucket.spamScore+=rowScore;}
+    // Decay old evidence so a user is not permanently labeled from one event.
+    bucket.spamScore=Math.min(bucket.spamScore,500); state.ariaSpamScores[id][userId]=bucket;
+    saveStore();
     if(score<s.threshold)return {score,reasons};
     const row=push(id, score>=90?'critical':score>=75?'high':'elevated', score, reasons.join('; '));
     audit?.({action:'securityAlert',target:id,detail:row.detail});
@@ -61,6 +76,14 @@ function setup({ bot, state, saveStore, accessControl, audit }) {
     const a=await can(userId,chatId); if(!a.ok)return {success:false,error:a.message};
     return {success:true,data:state.ariaSecurityIncidents.filter(x=>x.chatId===String(chatId)).slice(-limit).reverse()};
   }
-  return { analyze, profile, health, incidents, settings };
+  async function topSpam(userId,chatId,limit=10){
+    const a=await can(userId,chatId); if(!a.ok)return {success:false,error:a.message};
+    const rows=Object.values(state.ariaSpamScores[String(chatId)]||{})
+      .filter(x=>x.spamScore>0)
+      .sort((x,y)=>y.spamScore-x.spamScore)
+      .slice(0,limit);
+    return {success:true,data:rows};
+  }
+  return { analyze, profile, health, incidents, topSpam, settings };
 }
 module.exports={setup};

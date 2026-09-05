@@ -153,7 +153,7 @@ const socialDownloader = require("./services/socialDownloader");
 const statsTracker = require("./services/statsTracker");
 const { generateInfoCard } = require("./utils/infoCard");
 const { formatAiReplyForTelegram } = require("./utils/telegramRichText");
-const { detectNaturalImageRequest, generateImage: generateNaturalImage } = require("./services/imageGenerator");
+const { detectNaturalImageRequest, isNaturalImageQuestion, generateImage: generateNaturalImage } = require("./services/imageGenerator");
 const { detectIntent, progressBar, withRetry, isRecoverableTelegramError } = require("./services/smartAssistant");
 const codePending = new Map(); // userId -> { request, mode, files }
 const mediaPending = new Map(); // userId -> { platform }
@@ -660,12 +660,30 @@ const nodemailer = require("nodemailer");
 const EMAIL_USER = String(process.env.EMAIL_USER || process.env.GMAIL_USER || "").trim();
 const EMAIL_PASS = String(process.env.EMAIL_PASS || process.env.GMAIL_APP_PASSWORD || "").trim();
 
+const smtpOptions = {
+    connectionTimeout: 20000,
+    greetingTimeout: 15000,
+    socketTimeout: 30000,
+    auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+    tls: { minVersion: "TLSv1.2", servername: "smtp.gmail.com" }
+};
+
+// Gmail supports both STARTTLS (587) and implicit TLS (465). Some hosting
+// networks are more reliable with one route than the other, so verification
+// email sending can fall back to the second transport on connection errors.
 const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-        user: EMAIL_USER,
-        pass: EMAIL_PASS
-    }
+    ...smtpOptions,
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false,
+    requireTLS: true
+});
+const transporter465 = nodemailer.createTransport({
+    ...smtpOptions,
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    requireTLS: false
 });
 
 if (!EMAIL_USER || !EMAIL_PASS) {
@@ -1701,7 +1719,11 @@ async function classifyImage(buf, base64Data, mimeType, chatId, sender, chatTitl
 }
 async function sendVerificationEmail(email, code) {
     try {
-        await transporter.sendMail({
+        if (!EMAIL_USER || !EMAIL_PASS) {
+            console.error('[EMAIL] Missing EMAIL_USER or EMAIL_PASS');
+            return false;
+        }
+        const mail = {
             from: `"🌸 Miss Aria" <${EMAIL_USER}>`,
             to: email,
             subject: "🌸 Miss Aria - Email Verification Code",
@@ -1939,16 +1961,30 @@ If you didn't request this verification, you can safely ignore this email.
 
 © ${new Date().getFullYear()} Miss Aria
             `
-        });
+        };
 
-        console.log(`✅ Verification email sent to ${email}`);
+        let info;
+        try {
+            info = await transporter.sendMail(mail);
+        } catch (firstError) {
+            console.error(`[EMAIL] Gmail SMTP 587 failed: ${firstError?.code || 'UNKNOWN'} ${firstError?.message || firstError}`);
+            // Only fall back when the first SMTP route failed. Authentication
+            // errors are also logged clearly; the second route may still work
+            // with the same App Password.
+            info = await transporter465.sendMail(mail);
+            console.log('[EMAIL] Gmail SMTP 465 fallback succeeded.');
+        }
+
+        console.log(`✅ Verification email accepted by SMTP for ${email} (${info?.messageId || 'no-message-id'})`);
 
         return true;
 
     } catch (error) {
         console.error(
-            "❌ Email sending failed:",
-            error.message
+            '❌ Email sending failed:',
+            error?.code || 'UNKNOWN',
+            error?.responseCode || '',
+            error?.message || error
         );
 
         return false;
@@ -6533,6 +6569,8 @@ bot.on("message", async (msg) => {
   try {
     if (!msg.text || msg.text.startsWith("/") || !msg.from) return;
 
+    if (isNaturalImageQuestion(msg.text)) return;
+
     const request = detectNaturalImageRequest(msg.text);
     if (!request.isImageRequest) return;
 
@@ -7068,10 +7106,16 @@ bot.on("callback_query", async (query) => {
 
         verificationState.set(userId, verify);
 
-        await sendVerificationEmail(
+        const resent = await sendVerificationEmail(
             verify.email,
             verify.code
         );
+
+        if (!resent) {
+            return bot.answerCallbackQuery(query.id, {
+                text: "❌ Email delivery failed. Check SMTP settings."
+            });
+        }
 
         await bot.answerCallbackQuery(query.id, {
             text: "New verification code sent."
