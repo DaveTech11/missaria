@@ -124,6 +124,12 @@ try {
   console.error("statusServer failed to load (continuing without it):", err.message);
 }
 
+try {
+  require("./services/heartbeat").startHeartbeat();
+} catch (err) {
+  console.error("heartbeat failed to load (continuing without it):", err.message);
+}
+
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -651,13 +657,24 @@ function generateCode() {
 }
 const nodemailer = require("nodemailer");
 
+const EMAIL_USER = String(process.env.EMAIL_USER || process.env.GMAIL_USER || "").trim();
+const EMAIL_PASS = String(process.env.EMAIL_PASS || process.env.GMAIL_APP_PASSWORD || "").trim();
+
 const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
+        user: EMAIL_USER,
+        pass: EMAIL_PASS
     }
 });
+
+if (!EMAIL_USER || !EMAIL_PASS) {
+    console.error("❌ Gmail verification is not configured. Set EMAIL_USER and EMAIL_PASS in Render Environment Variables.");
+} else {
+    transporter.verify()
+        .then(() => console.log(`📧 Gmail SMTP ready for ${EMAIL_USER}`))
+        .catch(err => console.error("❌ Gmail SMTP connection failed:", err.message));
+}
 function clearPending(userId) {
   getUser(userId).pending = null;
   saveStore();
@@ -1685,7 +1702,7 @@ async function classifyImage(buf, base64Data, mimeType, chatId, sender, chatTitl
 async function sendVerificationEmail(email, code) {
     try {
         await transporter.sendMail({
-            from: `"🌸 Miss Aria" <${process.env.EMAIL_USER}>`,
+            from: `"🌸 Miss Aria" <${EMAIL_USER}>`,
             to: email,
             subject: "🌸 Miss Aria - Email Verification Code",
 

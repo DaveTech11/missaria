@@ -206,3 +206,14 @@ three concrete, testable mechanisms:
 
 All three are wired through `ownerRouter.js`'s existing owner-only,
 rate-limited, audited path — same security model as everything else.
+
+## Optional health heartbeat
+
+Miss Aria includes an optional health heartbeat. Set `HEARTBEAT_URL` to an external monitoring endpoint if you want the bot to send periodic health checks:
+
+```env
+HEARTBEAT_URL=https://your-monitoring-endpoint.example/health
+HEARTBEAT_INTERVAL_MS=600000
+```
+
+The default interval is 10 minutes. This heartbeat is for monitoring and does **not** bypass Render Free's idle spin-down policy. Render Free web services sleep after 15 minutes without inbound traffic; use an external monitor that requests your `/health` endpoint or move the Render service to a paid instance for reliable always-on operation.
