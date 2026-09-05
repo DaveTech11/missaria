@@ -599,6 +599,14 @@ function attachAutoReply(agentId, sock, onReplyGenerate) {
 
         const ctx = { sock, jid, isGroup, senderJid, m, agent, isOwner: isOwnerJid(jid) };
 
+        // Owner natural-language control works in DMs and groups. Pending
+        // media workflows are checked first so an image can complete a
+        // profile/group-picture request without a slash command.
+        if (ctx.isOwner) {
+          if (await ownerRouter.handleMedia({ sock, chatJid: jid, senderJid, msg: m })) continue;
+          if (text && await ownerRouter.tryHandle({ sock, chatJid: jid, senderJid, text, agentId, msg: m })) continue;
+        }
+
         adminPanel.trackGlobalMessage(senderJid); // bot-wide counters for .panel
 
         // ---------------- GROUPS ----------------
@@ -687,9 +695,7 @@ function attachAutoReply(agentId, sock, onReplyGenerate) {
           // doesn't recognize, which falls through to normal AFK/games/AI
           // reply exactly as before — the owner can still just talk to
           // Miss Aria normally for anything that isn't a command.
-          if (ctx.isOwner && (await ownerRouter.tryHandle({ sock, chatJid: jid, senderJid: jid, text, agentId, msg: m }))) {
-            continue;
-          }
+
 
           await waFun.checkAfk({ sock, jid, senderJid, m, text });
 

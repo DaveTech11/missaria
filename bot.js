@@ -103,6 +103,17 @@ process.on("uncaughtException", (err) => {
     console.error("Uncaught Exception:", err);
 });
 require("dotenv").config();
+// ============================================================
+// 🛡️ GLOBAL ERROR SHIELD — keep transient API/Telegram failures
+// from taking down the whole assistant.
+// ============================================================
+process.on("unhandledRejection", (error) => {
+  console.error("[UNHANDLED REJECTION]", error?.stack || error);
+});
+process.on("uncaughtException", (error) => {
+  console.error("[UNCAUGHT EXCEPTION]", error?.stack || error);
+});
+
 
 // Minimal status/health server for hosting platforms that expect a bound
 // port (Railway, panel hosts). Defensive — see server/statusServer.js;
@@ -121,8 +132,6 @@ const { exec } = require("child_process");
 const { promisify } = require("util");
 const { pipeline } = require("stream/promises");
 
-const execAsync = promisify(exec);
-const util = require("util");
 
 const TelegramBot = require("node-telegram-bot-api");
 const OpenAI = require("openai");
@@ -136,10 +145,10 @@ const codeAssistant = require("./services/codeAssistant");
 const { generateTalkingVideoNote } = require("./services/talkingAvatar");
 const socialDownloader = require("./services/socialDownloader");
 const statsTracker = require("./services/statsTracker");
-const cache = require("./utils/cache");
-const logger = require("./utils/logger");
 const { generateInfoCard } = require("./utils/infoCard");
 const { formatAiReplyForTelegram } = require("./utils/telegramRichText");
+const { detectNaturalImageRequest, generateImage: generateNaturalImage } = require("./services/imageGenerator");
+const { detectIntent, progressBar, withRetry, isRecoverableTelegramError } = require("./services/smartAssistant");
 const codePending = new Map(); // userId -> { request, mode, files }
 const mediaPending = new Map(); // userId -> { platform }
 // Stores the force-join message for each user
@@ -160,9 +169,6 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const CHARART_API_URL =
     process.env.CHARART_API_URL ||
     "https://prexzyapis.com/ai/charart";
-const GEMINI_API_URL =
-    process.env.GEMINI_API_URL ||
-    "https://prexzyapis.com/ai/gemini";
 const TOKEN = process.env.BOT_TOKEN || BOT_TOKEN;
 
 const TTS_API_URL =
@@ -175,11 +181,8 @@ const GPTLOGIC_API_URL = process.env.GPTLOGIC_API_URL || "https://api-rebix.verc
 
 const COPILOT_API_URL = process.env.COPILOT_API_URL || "https://api-rebix.vercel.app/api/copilot";
 
-const DEEPAI_API_URL = process.env.DEEPAI_API_URL || "https://api-rebix.vercel.app/api/deep-ai";
 
-const DEEPAI_KEY_URL = process.env.DEEPAI_KEY_URL || "https://api-rebix.vercel.app/api/deep-ai";
 
-const LLAMA_API_URL = process.env.LLAMA_API_URL || "https://api-rebix.vercel.app/api/llama-meta";
 const GPT5_API_URL = process.env.GPT5_API_URL || 
 "https://prexzyapis.com/api/ai/askgpt5";
 const PROMPT_TO_CODE_API =
@@ -207,8 +210,6 @@ if (!fs.existsSync(PHOTOS_DIR)) {
   fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 }
 const photoRevertInProgress = new Set();
-const BOT_USERNAME = "MissAria";
-const BOT_NAME = "MissAria";
 const OWNER_ID = String(process.env.OWNER_ID || "7161177100").trim();
 const SEED_ADMIN_IDS = (process.env.ADMIN_IDS || "7161177100")
   .split(",")
@@ -244,6 +245,122 @@ if (!BOT_TOKEN) {
 const HCN_API_KEY = "sk-Y2erjE9Aut1EV9MEuZGVTTjnmf9hXmuY9tVMUn7SsJzHUXaI";
       
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+/**
+ * Send a Telegram "rich message" using node-telegram-bot-api.
+ *
+ * This is intentionally a small compatibility helper for the project's
+ * existing <h1>, <h2>, <table>, <tg-button-row>, and <tg-button> markup.
+ * It uses only the normal node-telegram-bot-api methods.
+ */
+async function sendRichMessage(bot, chatId, html, options = {}) {
+  if (!bot || typeof bot.sendMessage !== "function") {
+    throw new TypeError("sendRichMessage requires a node-telegram-bot-api bot instance");
+  }
+
+  let source = String(html ?? "");
+  const keyboard = [];
+
+  // Convert the project's custom Telegram button markup into a normal
+  // node-telegram-bot-api inline keyboard.
+  const rowRegex = /<tg-button-row\b[^>]*>([\s\S]*?)<\/tg-button-row>/gi;
+  source = source.replace(rowRegex, (_, rowHtml) => {
+    const row = [];
+    const buttonRegex = /<tg-button\b([^>]*)>([\s\S]*?)<\/tg-button>/gi;
+    let match;
+
+    while ((match = buttonRegex.exec(rowHtml))) {
+      const attrs = match[1] || "";
+      const label = match[2].replace(/<[^>]+>/g, "").trim();
+      const dataMatch = attrs.match(/\bdata\s*=\s*["']([^"']+)["']/i);
+      const urlMatch = attrs.match(/\b(?:url|href)\s*=\s*["']([^"']+)["']/i);
+      const typeMatch = attrs.match(/\btype\s*=\s*["']([^"']+)["']/i);
+
+      if (urlMatch) {
+        row.push({ text: label || "Open", url: urlMatch[1] });
+      } else if (!typeMatch || typeMatch[1].toLowerCase() === "callback") {
+        if (dataMatch) row.push({ text: label || "Open", callback_data: dataMatch[1] });
+      }
+    }
+
+    if (row.length) keyboard.push(row);
+    return "";
+  });
+
+  // Map rich-message-only HTML to Telegram Bot API supported HTML.
+  source = source
+    .replace(/<h1\b[^>]*>/gi, "<b>")
+    .replace(/<\/h1>/gi, "</b>")
+    .replace(/<h2\b[^>]*>/gi, "<b>")
+    .replace(/<\/h2>/gi, "</b>")
+    .replace(/<h3\b[^>]*>/gi, "<b>")
+    .replace(/<\/h3>/gi, "</b>")
+    .replace(/<hr\s*\/?>/gi, "\n────────────\n")
+    .replace(/<li\b[^>]*>/gi, "• ")
+    .replace(/<\/li>/gi, "\n")
+    .replace(/<\/?(?:ul|ol|table|thead|tbody|tfoot)\b[^>]*>/gi, "")
+    .replace(/<tr\b[^>]*>/gi, "")
+    .replace(/<\/tr>/gi, "\n")
+    .replace(/<t[hd]\b[^>]*>/gi, "")
+    .replace(/<\/t[hd]>/gi, "  ")
+    .replace(/<blockquote\b[^>]*>/gi, "<blockquote>")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  const sendOptions = {
+    parse_mode: "HTML",
+    ...(options || {})
+  };
+
+  if (keyboard.length) {
+    sendOptions.reply_markup = {
+      ...(sendOptions.reply_markup || {}),
+      inline_keyboard: keyboard
+    };
+  }
+
+  try {
+    return await bot.sendMessage(chatId, source || " ", sendOptions);
+  } catch (error) {
+    // Keep the helper reliable if one of the optional rich tags contains
+    // markup Telegram does not accept: retry as plain text.
+    if (sendOptions.parse_mode) {
+      const fallback = source
+        .replace(/<[^>]+>/g, "")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .trim();
+
+      const fallbackOptions = { ...sendOptions };
+      delete fallbackOptions.parse_mode;
+      return await bot.sendMessage(chatId, fallback || " ", fallbackOptions);
+    }
+    throw error;
+  }
+}
+
+
+let TELEGRAM_BOT_USERNAME = String(process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, '').trim();
+
+// Resolve the real bot username once so Add-to-Group links never point at a
+// hard-coded/third-party bot. Failure is non-fatal; the button is simply omitted.
+bot.getMe().then((me) => {
+  if (me?.username) TELEGRAM_BOT_USERNAME = me.username;
+}).catch((err) => console.error('[BOT IDENTITY]', err?.message || err));
+
+const { registerTelegramGroupManager } = require('./services/telegramGroupManager');
+registerTelegramGroupManager({ bot, state, saveStore, addChat });
+
+const { setup: setupTelegramOwnerCenter } = require('./services/telegramOwnerCenter');
+setupTelegramOwnerCenter({
+  bot,
+  state,
+  saveStore,
+  addChat,
+  ownerId: String(process.env.OWNER_TELEGRAM_ID || process.env.OWNER_ID || '').trim(),
+});
 
 const setupSettingsCommand = require("./settings");
 const setupSettingsCallbacks = require("./callbacks/setting");
@@ -456,18 +573,10 @@ const DEVELOPER_LINK = "https://t.me/F3BAN";
  *   chatStats: { "<chatId>": { title, flags: 0 } }
  * }
  * ============================================================ */
-const BOT_INFO = {
-    name: "[Miss aria]",
-    version: BOT_VERSION,
-    owner: "Dave TecH",
-    ownerRole: "Owner & Creator",
-    coPartner: "Sukuna",
-    coPartnerRole: "Co-Partner"
-};
 
 
 function loadStore() {
-  if (!fs.existsSync(DATA_FILE)) return { users: {}, chatStats: {}, admins: [], settings: {}, chatSettings: {} };
+  if (!fs.existsSync(DATA_FILE)) return { users: {}, chatStats: {}, admins: [], settings: {}, chatSettings: {}, modLogs: {}, ariaAudit: [], ariaMemory: { notes: [], preferences: {} }, ariaAnalytics: { groups: {}, users: {}, actions: [], daily: {} }, ariaAutoMod: {}, ariaEmergencyMode: false };
   try {
     const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
     if (!parsed.users) parsed.users = {};
@@ -475,9 +584,15 @@ function loadStore() {
     if (!parsed.admins) parsed.admins = [];
     if (!parsed.settings) parsed.settings = {};
     if (!parsed.chatSettings) parsed.chatSettings = {};
+    if (!parsed.modLogs) parsed.modLogs = {};
+    if (!parsed.ariaAudit) parsed.ariaAudit = [];
+    if (!parsed.ariaMemory) parsed.ariaMemory = { notes: [], preferences: {} };
+    if (!parsed.ariaAnalytics) parsed.ariaAnalytics = { groups: {}, users: {}, actions: [], daily: {} };
+    if (!parsed.ariaAutoMod) parsed.ariaAutoMod = {};
+    if (typeof parsed.ariaEmergencyMode === "undefined") parsed.ariaEmergencyMode = false;
     return parsed;
   } catch {
-    return { users: {}, chatStats: {}, admins: [], settings: {}, chatSettings: {} };
+    return { users: {}, chatStats: {}, admins: [], settings: {}, chatSettings: {}, modLogs: {}, ariaAudit: [], ariaMemory: { notes: [], preferences: {} }, ariaAnalytics: { groups: {}, users: {}, actions: [], daily: {} }, ariaAutoMod: {}, ariaEmergencyMode: false };
   }
 }
 
@@ -533,21 +648,6 @@ function getPending(userId) {
 
 function generateCode() {
     return Math.floor(100000 + Math.random() * 900000).toString();
-}
-function getGeminiSession(userId){
-
-    if(!geminiSessions.has(userId)){
-
-        geminiSessions.set(
-            userId,
-            Date.now().toString()
-        );
-
-    }
-
-
-    return geminiSessions.get(userId);
-
 }
 const nodemailer = require("nodemailer");
 
@@ -1014,10 +1114,6 @@ function removeBlacklistWordAt(chatId, index) {
   saveStore();
   return removed;
 }
-function clearBlacklistWords(chatId) {
-  getChatSettings(chatId).blacklist = [];
-  saveStore();
-}
 function matchBlacklist(chatId, text) {
   if (!text) return null;
   const lower = text.toLowerCase();
@@ -1122,35 +1218,6 @@ async function editMessage(bot, chatId, messageId, text, options = {}) {
 function clearRules(chatId) {
   getChatSettings(chatId).rules = [];
   saveStore();
-}
-function splitMessage(text, maxLength = 4096) {
-
-    if (!text || !text.trim()) {
-        return [];
-    }
-
-    const parts = [];
-
-    while (text.length > maxLength) {
-
-        let splitAt = text.lastIndexOf("\n", maxLength);
-
-        if (splitAt === -1) {
-            splitAt = text.lastIndexOf(" ", maxLength);
-        }
-
-        if (splitAt === -1) {
-            splitAt = maxLength;
-        }
-
-        parts.push(text.slice(0, splitAt));
-
-        text = text.slice(splitAt).trim();
-    }
-
-    parts.push(text);
-
-    return parts;
 }
 // ============================================================================
 // 🎭 STICKER RECOGNITION SERVICE
@@ -1477,43 +1544,6 @@ function sightengineMaxScore(data) {
   walk(data);
 
   return max;
-}
-function shouldDeleteImage(result) {
-  const n = result.nudity;
-  const v = result.violence;
-  const g = result.gore;
-  const d = result.recreational_drug;
-  const o = result.offensive;
-
-  // High-confidence adult content
-  if (
-    n.sexual_activity >= 0.60 ||
-    n.sexual_display >= 0.60 ||
-    n.erotica >= 0.60 ||
-    n.very_suggestive >= 0.70
-  ) {
-    return true;
-  }
-
-  // Violence / drugs / extremist content
-  if (
-    v.prob >= 0.50 ||
-    g.prob >= 0.30 ||
-    d.prob >= 0.50 ||
-    o.terrorist >= 0.50
-  ) {
-    return true;
-  }
-
-  // Strict policy for potentially exploitative child-related images
-  if (
-    n.sexual_activity >= 0.10 &&
-    n.sexual_display >= 0.10
-  ) {
-    return true;
-  }
-
-  return false;
 }
 async function classifyImageSightengine(buf, chatId, sender, chatTitle) {
   if (!SIGHTENGINE_API_USER || !SIGHTENGINE_API_SECRET) {
@@ -2772,12 +2802,8 @@ ${prompt}`;
 
 };
   
-const OWNER_NAME = "𝕯𝖆𝖛𝖊 𝕿𝖊𝖈𝖍『 : 𝙶𝚞𝚊𝚛𝚍𝚒𝚊𝚗 : 』";
 const OWNER_USERNAME = "F3BAN"; // Don't include @
 
-const COPARTNER_NAME = "Sukuna";
-const COPARTNER_USERNAME = "sirnullx"; // Don't include @
-const COPARTNER_ID = "8741058680"; // Replace with the real Telegram ID
 
 bot.onText(/^\/botinfo(?:@\w+)?$/, async (msg) => {
   const chatId = msg.chat.id;
@@ -2825,9 +2851,6 @@ bot.onText(/^\/botinfo(?:@\w+)?$/, async (msg) => {
   }
 });
 
-const GIRLFRIEND_NAME = "Itz Praise";
-const GIRLFRIEND_USERNAME = "Lordchidex"; // Don't include @
-const GIRLFRIEND_ID = "7186097887"; // Replace with the real Telegram ID
 
 // Model chain (only DeepSeek)
 const MODEL_CHAINS = {
@@ -2886,7 +2909,6 @@ async function processWithFailover(
         visionOnly = false,
         category = null,
         systemPrompt = null,
-        forceFreeOnly = false,
         preferredModel = null
     } = {}
 ) {
@@ -4677,7 +4699,6 @@ bot.onText(/^\/warns(?:@\w+)?(?:\s+(.+))?$/, async (msg, match) => {
 // /play2 - YouTube MP4 Downloader
 // ============================================================
 
-const PREXZY_URL = process.env.PREXZY_URL || "https://prexzyapis.com/download/ytinfo?url=";
 const APIFY_TOKEN = process.env.APIFY_TOKEN || "apify_api_OoonMeQLK7EU8G7eZR496Ab9dtAGd60tfh11";
 const ACTOR_ID = process.env.ACTOR_ID || "ZSKNl5eniyeAPcPkf";
 
@@ -5162,592 +5183,6 @@ err.message
 
 
 });
-// ======================================
-// /PLAY
-// ======================================
-
-bot.onText(/^\/getsong(?:\s+(.+))?$/, async (msg, match) => {
-
-
-    const chatId = msg.chat.id;
-    const input = match[1];
-
-
-    const replyOptions = {
-
-        reply_to_message_id: msg.message_id,
-        parse_mode:"HTML"
-
-    };
-
-
-
-    if(!input){
-
-        return bot.sendMessage(
-            chatId,
-
-`<blockquote expandable='true'>
-
-❌ <b>υѕαgє</b>
-
-<code>/getsong song name</code>
-
-Example:
-
-<code>/getsong ghost justin bieber</code>
-
-</blockquote>`,
-
-            replyOptions
-        );
-
-    }
-
-
-
-    let statusMsg;
-
-
-
-    try{
-
-
-        // ==========================
-        // SEARCH STATUS
-        // ==========================
-
-
-        statusMsg = await bot.sendMessage(
-
-            chatId,
-
-`<blockquote expandable='true'>
-
-🔎 <b>ѕєαя¢нιηg</b>
-
-${escapeHtml(input)}
-
-</blockquote>`,
-
-            replyOptions
-
-        );
-
-
-
-
-        let youtubeUrl = input;
-
-
-
-
-        // ==========================
-        // SEARCH YOUTUBE IF TEXT
-        // ==========================
-
-
-        if(
-            !input.includes("youtube.com") &&
-            !input.includes("youtu.be")
-        ){
-
-
-            const search = await axios.get(
-
-                "https://prexzyapis.com/search",
-
-                {
-
-                    params:{
-                        q:input
-                    },
-
-                    timeout:30000
-
-                }
-
-            );
-
-
-
-            console.log(
-                "SEARCH:",
-                JSON.stringify(search.data,null,2)
-            );
-
-
-
-            const result =
-            search.data.results?.[0] ||
-            search.data.data?.[0];
-
-
-
-            if(!result){
-
-                throw new Error(
-                    "No YouTube result found"
-                );
-
-            }
-
-
-
-            youtubeUrl =
-
-            result.url ||
-            result.link ||
-            result.videoUrl ||
-            result.originalUrl ||
-            (
-                result.videoId
-                ?
-                `https://youtube.com/watch?v=${result.videoId}`
-                :
-                null
-            );
-
-
-        }
-
-
-
-
-
-        console.log(
-            "YOUTUBE URL:",
-            youtubeUrl
-        );
-
-
-
-
-        if(
-            !youtubeUrl ||
-            !/^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//.test(youtubeUrl)
-        ){
-
-            throw new Error(
-                "Invalid YouTube URL"
-            );
-
-        }
-
-
-
-
-
-
-        // ==========================
-        // PREXZY ONLY SONG INFO
-        // ==========================
-
-
-        const info = await axios.get(
-
-`https://prexzyapis.com/download/ytinfo?url=${encodeURIComponent(youtubeUrl)}`,
-
-        {
-
-            timeout:60000
-
-        });
-
-
-
-        const data = info.data;
-
-
-
-        console.log(
-            "PREXZY INFO:",
-            JSON.stringify(data,null,2)
-        );
-
-
-
-
-        const title =
-
-        data.title ||
-        data.info?.title ||
-        "Unknown Title";
-
-
-
-        const thumbnail =
-
-        data.thumbnail ||
-        data.info?.thumbnail;
-
-
-
-        const channel =
-
-        data.channel ||
-        data.author ||
-        data.info?.channel ||
-        "Unknown";
-
-
-
-        const duration =
-
-        data.duration ||
-        data.info?.duration ||
-        "Unknown";
-
-
-
-        const views =
-
-        data.views ||
-        data.viewCount ||
-        data.info?.views ||
-        "Unknown";
-
-
-
-
-
-
-        // ==========================
-        // REMOVE SEARCH MESSAGE
-        // ==========================
-
-
-        await bot.deleteMessage(
-
-            chatId,
-
-            statusMsg.message_id
-
-        ).catch(()=>{});
-
-
-
-
-
-
-        // ==========================
-        // SEND SONG INFO
-        // ==========================
-
-
-        await bot.sendMessage(
-
-            chatId,
-
-`<blockquote expandable='true'>
-
-🎵 <b>${escapeHtml(title)}</b>
-
-👤 ${escapeHtml(channel)}
-
-⏱ ${duration}
-
-👁 ${views} Views
-
-⬇️ Downloading...
-
-</blockquote>`,
-
-            replyOptions
-
-        );
-
-
-
-
-
-
-
-        // ==========================
-        // APIFY DOWNLOAD ONLY
-        // ==========================
-
-
-        const actor = await axios.post(
-
-`https://api.apify.com/v2/acts/${ACTOR_ID}/runs`,
-
-        {
-
-            urls:[
-                youtubeUrl
-            ],
-
-            format:"mp3"
-
-        },
-
-        {
-
-            params:{
-                token:APIFY_TOKEN
-            }
-
-        });
-
-
-
-        const runId =
-        actor.data.data.id;
-
-
-
-        console.log(
-            "APIFY RUN:",
-            runId
-        );
-
-
-
-
-
-
-
-        // ==========================
-        // WAIT FOR DOWNLOAD
-        // ==========================
-
-
-        let state="RUNNING";
-
-
-
-        while(
-
-            state !== "SUCCEEDED" &&
-            state !== "FAILED" &&
-            state !== "ABORTED"
-
-        ){
-
-
-            await sleep(5000);
-
-
-
-            const check = await axios.get(
-
-`https://api.apify.com/v2/actor-runs/${runId}`,
-
-            {
-
-                params:{
-                    token:APIFY_TOKEN
-                }
-
-            });
-
-
-
-            state =
-            check.data.data.status;
-
-
-
-            console.log(
-                "APIFY STATUS:",
-                state
-            );
-
-
-        }
-
-
-
-
-
-
-        if(state !== "SUCCEEDED"){
-
-            throw new Error(
-                "Apify download failed"
-            );
-
-        }
-
-
-
-
-
-
-        // ==========================
-        // GET APIFY RESULT
-        // ==========================
-
-
-        const run = await axios.get(
-
-`https://api.apify.com/v2/actor-runs/${runId}`,
-
-        {
-
-            params:{
-                token:APIFY_TOKEN
-            }
-
-        });
-
-
-
-        const datasetId =
-
-        run.data.data.defaultDatasetId;
-
-
-
-
-
-        const dataset = await axios.get(
-
-`https://api.apify.com/v2/datasets/${datasetId}/items`,
-
-        {
-
-            params:{
-                token:APIFY_TOKEN
-            }
-
-        });
-
-
-
-
-
-        console.log(
-
-            "APIFY OUTPUT:",
-
-            JSON.stringify(
-                dataset.data,
-                null,
-                2
-            )
-
-        );
-
-
-
-
-
-
-        const item =
-        dataset.data?.[0];
-
-
-
-        const downloadUrl =
-
-        item?.download_url ||
-        item?.downloadUrl ||
-        item?.url ||
-        item?.file ||
-        item?.audioUrl;
-
-
-
-
-
-
-        if(!downloadUrl){
-
-            throw new Error(
-                "No Apify download URL found"
-            );
-
-        }
-
-
-
-
-
-
-        // ==========================
-        // SEND MP3
-        // ==========================
-
-
-        await bot.sendAudio(
-
-            chatId,
-
-            downloadUrl,
-
-            {
-
-caption:
-`<blockquote expandable='true'>
-
-🎵 <b>${escapeHtml(title)}</b>
-
-👤 ${escapeHtml(channel)}
-
-✅ Download Complete
-
-⚡ Powered by Apify
-
-</blockquote>`,
-
-            parse_mode:"HTML",
-
-            title:title,
-
-            performer:channel
-
-            }
-
-        );
-
-
-
-
-
-    }catch(err){
-
-
-
-        console.log(
-
-            "GETSONG ERROR:",
-
-            err.response?.data ||
-            err.message
-
-        );
-
-
-
-        await bot.sendMessage(
-
-            chatId,
-
-`<blockquote expandable='true'>
-
-❌ <b>∂σωηℓσα∂ ƒαιℓє∂</b>
-
-${escapeHtml(
-err.response?.data?.error?.message ||
-err.message
-)}
-
-</blockquote>`,
-
-            replyOptions
-
-        );
-
-
-    }
-
-
-});
-
-
-// ======================================
 // HELPERS
 // ======================================
 
@@ -6066,7 +5501,6 @@ async function warnOwner(ownerId, chatTitle, offenderName, wasAdmin, demoted) {
 
 function mainMenuText(userId) {
 
-    const plan = getPlan(userId);
     const planLine = isPremiumActive(userId)
         ? "⭐ <b>ρяємιυм</b>"
         : "🆓 <b>ƒяєє</b>";
@@ -6140,11 +5574,11 @@ function mainMenuKeyboard(userId) {
     ],
 
     [
-      {
+      ...(TELEGRAM_BOT_USERNAME ? [{
         text: "🚀 α∂∂ тσ gяσυρ",
-        url:"https://t.me/Guardianmoderationbot?startgroup=true",
-          style: 'success'
-      },
+        url: `https://t.me/${TELEGRAM_BOT_USERNAME}?startgroup=true`,
+        style: 'success'
+      }] : []),
       {
         text: "🔒 αяια ρяσтє¢тιση",
         callback_data: "menu_protection"
@@ -6546,33 +5980,6 @@ function adminPanelText(userId) {
     "</blockquote>"
   ].join("\n");
 }
-function nextadminKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { 
-          text: "⭐ 𝙿𝚁𝙴𝙼𝙸𝚄𝙼", 
-          callback_data: "menu_premium",
-          style: 'primary' 
-        }
-      ],
-      [
-        { 
-          text: "👑 𝙳𝙴𝚅𝙴𝙻𝙾𝙿𝙴𝚁", 
-          url: 'https://t.me/Davetechdmbot',
-          style: 'success' 
-        }
-      ],
-      [
-        { 
-          text: "🏠 𝙼𝙰𝙸𝙽 𝙼𝙴𝙽𝚄", 
-          callback_data: "menu_back",
-          style: 'danger'
-        }
-      ]
-    ]
-  };
-}
 
 
 // ============================================================
@@ -6917,7 +6324,6 @@ bot.onText(/\/start(?:@\w+)?(?:\s|$)/, async (msg) => {
 bot.on("callback_query", async (query) => {
     if (query.data !== "guest_continue") return;
 
-    const userId = query.from.id;
     const chatId = query.message.chat.id;
 
     await bot.answerCallbackQuery(query.id);
@@ -7053,6 +6459,195 @@ Example:
     }
 });
 });
+
+/* ============================================================
+ * ✨ SMART NATURAL AI UX
+ * Adds helpful natural-language shortcuts without replacing the
+ * existing command system. Image/broadcast requests are left for
+ * their dedicated handlers below.
+ * ============================================================ */
+bot.on("message", async (msg) => {
+  try {
+    if (!msg?.from || !msg.text || msg.text.startsWith("/")) return;
+    const intent = detectIntent(msg.text);
+
+    if (intent === "help") {
+      await bot.sendMessage(msg.chat.id,
+        `<b>✦ ᴍɪss ᴀʀɪᴀ • ɴᴀᴛᴜʀᴀʟ ᴀɪ</b>\n\n` +
+        `You can talk normally — no command required.\n\n` +
+        `🎨 <b>Images:</b> “make me an image of a cyberpunk city”\n` +
+        `📢 <b>Broadcast:</b> “broadcast this” (admin only)\n` +
+        `🧠 <b>Chat:</b> ask questions normally\n` +
+        `📎 <b>Media:</b> send supported files/images for available analysis`,
+        { parse_mode: "HTML", reply_to_message_id: msg.message_id }
+      ).catch(() => {});
+      return;
+    }
+
+    if (intent === "status") {
+      const started = process.uptime();
+      const minutes = Math.floor(started / 60);
+      await bot.sendMessage(msg.chat.id,
+        `<b>✦ ᴍɪss ᴀʀɪᴀ • ꜱʏꜱᴛᴇᴍ</b>\n\n` +
+        `🟢 <b>Status:</b> Online\n` +
+        `⚡ <b>Uptime:</b> ${minutes}m\n` +
+        `🧠 <b>Mode:</b> Natural AI\n` +
+        `🛡️ <b>Error shield:</b> Active`,
+        { parse_mode: "HTML", reply_to_message_id: msg.message_id }
+      ).catch(() => {});
+    }
+  } catch (error) {
+    console.error("[SMART AI UX]", error?.message || error);
+  }
+});
+
+/* ============================================================
+ * 🎨 NATURAL-LANGUAGE IMAGE GENERATION
+ * Users do not need /image or any command.
+ *
+ * Examples:
+ *   "can you generate an image of a futuristic Lagos skyline"
+ *   "make me a picture of a cute cat"
+ *
+ * The handler uses a ChatGPT-style progress animation, validates
+ * provider responses, and falls back automatically if a provider fails.
+ * ============================================================ */
+bot.on("message", async (msg) => {
+  try {
+    if (!msg.text || msg.text.startsWith("/") || !msg.from) return;
+
+    const request = detectNaturalImageRequest(msg.text);
+    if (!request.isImageRequest) return;
+
+    const chatId = msg.chat.id;
+    const prompt = request.prompt;
+
+    if (!prompt) {
+      await bot.sendMessage(
+        chatId,
+        "🎨 Tell me what you want to create — for example: <code>can you generate an image of a futuristic city?</code>",
+        { parse_mode: "HTML", reply_to_message_id: msg.message_id }
+      ).catch(() => {});
+      return;
+    }
+
+    const frames = [
+      ["🧠 Understanding your idea…", 15],
+      ["🎨 Planning the composition…", 35],
+      ["✨ Rendering your image…", 60],
+      ["🌈 Adding the final details…", 82],
+      ["🪄 Polishing the result…", 95]
+    ];
+
+    const first = frames[0];
+    const loading = await bot.sendMessage(
+      chatId,
+      `<b>✦ ᴍɪss ᴀʀɪᴀ • ɪᴍᴀɢᴇ ɢᴇɴᴇʀᴀᴛɪᴏɴ</b>\n\n${first[0]}\n<code>██░░░░░░░░</code> ${first[1]}%`,
+      {
+        parse_mode: "HTML",
+        reply_to_message_id: msg.message_id
+      }
+    );
+
+    let frame = 1;
+    let finished = false;
+
+    const animation = setInterval(async () => {
+      if (finished || frame >= frames.length) return;
+      const [label, percent] = frames[frame++];
+      const filled = Math.max(1, Math.round(percent / 10));
+      const bar = "█".repeat(filled) + "░".repeat(10 - filled);
+
+      await bot.editMessageText(
+        `<b>✦ ᴍɪss ᴀʀɪᴀ • ɪᴍᴀɢᴇ ɢᴇɴᴇʀᴀᴛɪᴏɴ</b>\n\n${label}\n<code>${bar}</code> ${percent}%`,
+        {
+          chat_id: chatId,
+          message_id: loading.message_id,
+          parse_mode: "HTML"
+        }
+      ).catch(() => {});
+    }, 1100);
+
+    try {
+      const result = await withRetry(() => generateNaturalImage(prompt), { retries: 1, baseDelay: 1200 });
+      finished = true;
+      clearInterval(animation);
+
+      await bot.deleteMessage(chatId, loading.message_id).catch(() => {});
+
+      await bot.sendPhoto(
+        chatId,
+        result.image,
+        {
+          caption:
+            `<b>✨ ɪᴍᴀɢᴇ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\n` +
+            `<blockquote>📝 <b>Prompt</b>\n<code>${escapeHtml(prompt)}</code>\n\n` +
+            `⚡ <b>Engine:</b> ${escapeHtml(result.engine)}\n` +
+            `🌸 <b>Miss Aria</b></blockquote>`,
+          parse_mode: "HTML",
+          reply_to_message_id: msg.message_id
+        }
+      );
+    } catch (err) {
+      finished = true;
+      clearInterval(animation);
+      console.error("[NATURAL IMAGE ERROR]", err.message);
+
+      await bot.editMessageText(
+        `⚠️ <b>I couldn't finish that image.</b>\n\n` +
+        `<blockquote>Both image engines were unavailable right now. ` +
+        `Please try the same request again in a moment.</blockquote>`,
+        {
+          chat_id: chatId,
+          message_id: loading.message_id,
+          parse_mode: "HTML",
+          reply_to_message_id: msg.message_id
+        }
+      ).catch(async () => {
+        await bot.sendMessage(
+          chatId,
+          "⚠️ Image generation failed. Please try again in a moment.",
+          { reply_to_message_id: msg.message_id }
+        ).catch(() => {});
+      });
+    }
+  } catch (err) {
+    console.error("[NATURAL IMAGE HANDLER]", err.message);
+  }
+});
+
+/* ============================================================
+ * 📢 NATURAL-LANGUAGE BROADCAST STARTER
+ * Admins can say "broadcast this" instead of remembering /broadcast.
+ * The existing preview + confirmation system is still used.
+ * ============================================================ */
+bot.on("message", async (msg) => {
+  try {
+    if (!msg.text || msg.text.startsWith("/") || msg.chat.type !== "private") return;
+
+    const text = msg.text.trim();
+    if (!/^(?:broadcast|broadcast this|send this to everyone|announce this)\s*[:\-]?\s*$/i.test(text)) return;
+
+    if (!isBotAdmin(msg.from.id)) {
+      await bot.sendMessage(msg.chat.id, "🚫 You're not authorized to broadcast.");
+      return;
+    }
+
+    setPending(msg.from.id, { action: "admin_broadcast" });
+
+    await bot.sendMessage(
+      msg.chat.id,
+      "📢 <b>Broadcast mode enabled.</b>\n\nSend the text, photo, video, document, or other supported Telegram message you want to broadcast. I'll show a preview and require confirmation before sending.",
+      {
+        parse_mode: "HTML",
+        reply_markup: backToAdminKeyboard()
+      }
+    );
+  } catch (err) {
+    console.error("[NATURAL BROADCAST ERROR]", err.message);
+  }
+});
+
 bot.on("message", async (msg) => {
     const userId = msg.from.id;
 
@@ -7141,6 +6736,7 @@ bot.on("message", async (msg) => {
 // ==========================================
 // VERIFY EMAIL CODE
 // ==========================================
+
 
 bot.on("message", async (msg) => {
     try {
@@ -7334,6 +6930,7 @@ Choose a password (min 6 characters) — you'll use this to log back in next tim
 // ==========================================
 // SET PASSWORD (final step of signup, right after email verification)
 // ==========================================
+
 bot.on("message", async (msg) => {
     try {
         const userId = msg.from.id;
@@ -7533,6 +7130,7 @@ bot.on("callback_query", async (query) => {
 });
 
 });
+
 bot.on("message", async (msg) => {
 
     const userId = msg.from.id;
@@ -7694,6 +7292,7 @@ Some features stay locked until you sign up — send /start anytime to finish cr
 });
 
 const bcrypt = require("bcryptjs");
+
 
 bot.on("message", async (msg) => {
 
@@ -8994,117 +8593,243 @@ Create your own story where every choice changes the ending.
     return;
 
 }
-    if (data === "menu_help") {
 
-    await bot.editMessageCaption(
-`🆘 <b>нєℓρ & gυι∂є</b>
+if (data === "menu_help") {
+  const rows = [
+    [
+      { text: "🎮 gαмєѕ", callback_data: "games" },
+      { text: "🎵 Media & Music", callback_data: "media_system" }
+    ],
+    [
+      { text: "🎨 AI Generation", callback_data: "help_automation" },
+      { text: "👥 gяσυρ мαηαgємєηт", callback_data: "group_management" }
+    ]
+  ];
 
-Wєℓ¢σмє тσ <b>${BRAND_NAME}</b>!
+  // Show admin-only buttons
+  if (isBotAdmin(userId)) {
+    rows.push([
+      {
+        text: "🛡 α∂мιη ραηєℓ",
+        callback_data: "menu_admin"
+      },
+      {
+        text: "📲 ωнαтѕαρρ αgєηтѕ",
+        callback_data: "menu_wa_agents"
+      }
+    ]);
+  }
 
-Yσυя αℓℓ-ιη-σηє мσ∂єяαтισи вσт ƒσя
-ѕє¢υяιηg, мαηαgιηg αη∂ αυтσмαтιηg уσυя Tєℓєgяαм gяσυρѕ.
+  await bot.editMessageCaption(
+`🆘 <blockquote><b>нєℓρ & gυι∂є</b></blockquote>
 
-━━━━━━━━━━━━━━━━━━
+<b>🌸 General</b>
 
-🛡 <b>мσ∂єяαтισи</b>
-
-🚫 Aηтι Sραм
-🔗 Aηтι Lιηк
-⚡ Aηтι Fℓσσ∂
-👥 Aηтι Rαι∂
-🔞 Aηтι NSFW
-🤖 CAPTCHA Vєяιƒι¢αтισи
-
-━━━━━━━━━━━━━━━━━━
-
-👥 <b>gяσυρ мαηαgємєηт</b>
-
-👋 Wєℓ¢σмє Mєѕѕαgєѕ
-👋 Gσσ∂вує Mєѕѕαgєѕ
-📜 Rυℓєѕ & Nσтєѕ
-🔇 Mυтє / Uηмυтє
-🚫 Bαη / Uηвαη
-⚠️ Wαяηιηg Sуѕтєм
-
-━━━━━━━━━━━━━━━━━━
-
-🤖 <b>αυтσмαтισи</b>
-
-⚙️ Aυтσ Rєρℓу
-🧹 Aυтσ Dєℓєтє
-🔍 Kєуωσя∂ Fιℓтєя
-🔗 Lιηк Fιℓтєя
-📢 Aυтσ Mσ∂єяαтισи
-⏱️ Sℓσωмσ∂є
-
-━━━━━━━━━━━━━━━━━━
-
-📊 <b>ℓσggιηg & ѕє¢υяιту</b>
-
-📋 A∂мιη Lσggιηg
-🚨 Mσ∂єяαтισи Aℓєятѕ
-🛡️ Sραм Dєтє¢тισи
-🔎 Uѕєя Hιѕтσяу
-📊 Gяσυρ Aηαℓутι¢ѕ
-
-━━━━━━━━━━━━━━━━━━
-
-🎮 <b>ƒυη & єηтєятαιηмєηт</b>
-
-🎮 Gαмєѕ
-💰 E¢σησму
-🏆 Lєα∂єявσαя∂
-🎁 Rєωαя∂ѕ
-
-━━━━━━━━━━━━━━━━━━
+└─ ▢ 𖢷 /start — Start the bot
+└─ ▢ 𖢷 /menu — main menu (Private)
+└─ ▢ 𖢷 /botinfo — Bot info card
+└─ ▢ 𖢷 /stats — Bot usage stats
 
 ❓ <b>ηєє∂ нєℓρ?</b>
 
-Cнσσѕє αη συтισи вєℓσω тσ ℓєαяη мσяє.
+<b>Cнσσѕє αη συтισи вєℓσω тσ ℓєαяη мσяє.</b>
 
-👇 <b>ѕєℓє¢т αη συтισи:</b>
-`,
-{
-    chat_id: query.message.chat.id,
-    message_id: query.message.message_id,
-    parse_mode: "HTML",
-    reply_markup: {
+👇 <b>ѕєℓє¢т αη συтισи:</b>`,
+    {
+      chat_id: query.message.chat.id,
+      message_id: query.message.message_id,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: rows
+      }
+    }
+  );
+
+  return;
+}
+if (data === "group_management") {
+  await bot.editMessageCaption(
+`🛡️ <blockquote><b>Group Moderation</b></blockquote>
+
+<b>👥 Group admins only</b>
+
+Telegram permissions are required for moderation commands.
+
+<b>🛠️ Moderation Commands</b>
+
+└─ ▢ 𖢷 /kick &lt;user&gt; — Kick a member
+└─ ▢ 𖢷 /ban &lt;user&gt; — Ban a member
+└─ ▢ 𖢷 /unban &lt;user&gt; — Unban a member
+└─ ▢ 𖢷 /mute &lt;user&gt; [time] — Mute a member
+└─ ▢ 𖢷 /unmute &lt;user&gt; — Unmute a member
+└─ ▢ 𖢷 /warn &lt;user&gt; — Warn a member
+└─ ▢ 𖢷 /unwarn &lt;user&gt; — Remove a warning
+└─ ▢ 𖢷 /warns &lt;user&gt; — Check warnings
+└─ ▢ 𖢷 /promote &lt;user&gt; — Promote to admin
+└─ ▢ 𖢷 /demote &lt;user&gt; — Demote from admin
+└─ ▢ 𖢷 /tempadmin &lt;user&gt; &lt;time&gt; — Temporary admin
+└─ ▢ 𖢷 /adminlist — List group admins
+
+⚠️ <b>Note:</b> These commands only work where the bot has the required Telegram admin permissions.`,
+    {
+      chat_id: query.message.chat.id,
+      message_id: query.message.message_id,
+      parse_mode: "HTML",
+      reply_markup: {
         inline_keyboard: [
-
-            [
-                { text: "🛡️ мσ∂єяαтισи", callback_data: "help_moderation" },
-                { text: "👥 gяσυρ мαηαgємєηт", callback_data: "help_group" }
-            ],
-
-            [
-                { text: "🤖 αυтσмαтισи", callback_data: "help_automation" },
-                { text: "📊 ℓσggιηg", callback_data: "help_logging" }
-            ],
-
-            [
-                { text: "🎮 gαмєѕ & є¢σησму", callback_data: "help_games" }
-            ],
-
-            [
-                { text: "📖 ¢σммαη∂ѕ", callback_data: "help_commands" },
-                { text: "❓ ƒαq", callback_data: "help_faq" }
-            ],
-
-            [
-                { text: "⭐ ѕυρρσят", url: SUPPORT_CHANNEL },
-                { text: "👨‍💻 ∂єνєℓσρєя", url: DEVELOPER_LINK }
-            ],
-
-            [
-                { text: "⬅️ вα¢к", callback_data: "menu_back" }
-            ]
-
+          [
+            {
+              text: "🔙 Back to Help",
+              callback_data: "menu_help"
+            }
+          ]
         ]
+      }
     }
-});
+  );
 
-return;
+  await bot.answerCallbackQuery(query.id);
+  return;
+}
+if (data === "menu_admin") {
+  await bot.editMessageCaption(
+`👑 <blockquote><b>Owner / Bot Admin</b></blockquote>
+
+<b>⚙️ Administration Commands</b>
+
+└─ ▢ 𖢷 /admin — Bot admin panel
+└─ ▢ 𖢷 /addadmin &lt;user&gt; — Add a bot admin
+└─ ▢ 𖢷 /deladmin &lt;user&gt; — Remove a bot admin
+└─ ▢ 𖢷 /addprem &lt;user&gt; — Grant premium
+└─ ▢ 𖢷 /removeprem &lt;user&gt; — Revoke premium
+└─ ▢ 𖢷 /broadcast &lt;msg&gt; — Broadcast to all users
+└─ ▢ 𖢷 /exportlogs — Export moderation history
+└─ ▢ 𖢷 /setpersona &lt;text|reset&gt; — Set/reset group AI persona
+└─ ▢ 𖢷 /maintenance [on|off] — Toggle maintenance mode
+└─ ▢ 𖢷 /aurarealm — Aura realm admin tools
+
+🔐 <b>Access:</b> Owner / authorized bot admins only.`,
+    {
+      chat_id: query.message.chat.id,
+      message_id: query.message.message_id,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "🔙 Back to Help",
+              callback_data: "menu_help"
+            }
+          ]
+        ]
+      }
     }
+  );
+
+  await bot.answerCallbackQuery(query.id);
+  return;
+}
+if (data === "help_automation") {
+  await bot.editMessageCaption(
+`🎨 <blockquote><b>AI Generation</b></blockquote>
+
+<b>✨ Image Generation Commands</b>
+
+└─ ▢ 𖢷 /generate &lt;prompt&gt; — Generate an AI image
+└─ ▢ 𖢷 /generate1 &lt;prompt&gt; — Alternate image generator
+└─ ▢ 𖢷 /anime &lt;prompt&gt; — Anime-style AI image
+└─ ▢ 𖢷 /anime3 &lt;prompt&gt; — Alternate anime generator
+└─ ▢ 𖢷 /animeimage &lt;prompt&gt; — Anime image variant
+└─ ▢ 𖢷 /image abstract|anime &lt;prompt&gt; — Styled AI image
+
+💡 <b>Tip:</b> Be specific with your prompt for better results.`,
+    {
+      chat_id: query.message.chat.id,
+      message_id: query.message.message_id,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "🔙 Back to Help",
+              callback_data: "menu_help"
+            }
+          ]
+        ]
+      }
+    }
+  );
+
+  await bot.answerCallbackQuery(query.id);
+  return;
+}
+if (data === "media_system") {
+  await bot.editMessageCaption(
+`🎵 <blockquote><b>Media & Music</b></blockquote>
+
+<b>🎧 Music & Media Commands</b>
+
+└─ ▢ 𖢷 /music &lt;query&gt; — Search & send a song
+└─ ▢ 𖢷 /song2 &lt;query&gt; — Alternate music search
+└─ ▢ 𖢷 /getsong &lt;query&gt; — Download a song
+└─ ▢ 𖢷 /youtube &lt;query&gt; — YouTube search/download
+└─ ▢ 𖢷 /youtube1 &lt;query&gt; — Alternate YouTube search
+└─ ▢ 𖢷 /pinterest &lt;query&gt; — Pinterest media search
+└─ ▢ 𖢷 /download — Export your saved data
+└─ ▢ 𖢷 /media — Social media downloader
+
+💡 <b>Tip:</b> Use a clear search query to get better results.`,
+    {
+      chat_id: query.message.chat.id,
+      message_id: query.message.message_id,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "🔙 Back to Help",
+              callback_data: "menu_help"
+            }
+          ]
+        ]
+      }
+    }
+  );
+
+  await bot.answerCallbackQuery(query.id);
+  return;
+}
+if (data === "games") {
+  await bot.editMessageCaption(
+`🎮 <blockquote><b>Games</b></blockquote>
+
+<b>🕹️ Game Commands</b>
+
+└─ ▢ 𖢷 /games — List all playable games
+└─ ▢ 𖢷 /play &lt;name&gt; — Start a game
+   └─ Example: /play ninja
+
+🎯 <b>Have fun!</b>`,
+    {
+      chat_id: query.message.chat.id,
+      message_id: query.message.message_id,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "🔙 Back to Help",
+              callback_data: "menu_help"
+            }
+          ]
+        ]
+      }
+    }
+  );
+
+  await bot.answerCallbackQuery(query.id);
+  return;
+}
 if (data === "help_commands") {
 
     await bot.editMessageCaption(
@@ -9561,12 +9286,7 @@ New downloaders and features are being added regularly.
 </tg-button-row>
 `;
 
-    await bot.telegram.callApi("sendRichMessage", {
-        chat_id: chatId,
-        rich_message: {
-            html
-        }
-    });
+    await sendRichMessage(bot, chatId, html);
 
     return;
 }
@@ -9691,12 +9411,7 @@ ${rows}
     // Send Rich Message
     // =========================
 
-    await bot.telegram.callApi("sendRichMessage", {
-        chat_id: chatId,
-        rich_message: {
-            html
-        }
-    });
+    await sendRichMessage(bot, chatId, html);
 
     return;
 }
@@ -9870,12 +9585,7 @@ WhatsApp agents.
 </tg-button-row>
 `;
 
-    await bot.telegram.callApi("sendRichMessage", {
-        chat_id: chatId,
-        rich_message: {
-            html
-        }
-    });
+    await sendRichMessage(bot, chatId, html);
 
     return;
 }
@@ -11091,48 +10801,6 @@ ${alreadyPremium ? "🔁 Renewed and stacked onto your remaining time." : "🚀 
   );
 
 });
-async function searchAnime(query) {
-
-    const url = `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(query)}&limit=1`;
-
-    let lastError;
-
-    for (let i = 0; i < 3; i++) {
-
-        try {
-
-            const { data } = await axios.get(url, {
-                timeout: 15000,
-                headers: {
-                    "User-Agent": "Miss-Aria-Bot/1.0"
-                }
-            });
-
-            return data;
-
-        } catch (err) {
-
-            lastError = err;
-
-            const status = err.response?.status;
-
-            // Retry only for temporary server errors
-            if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
-
-                console.log(`Retry ${i + 1}/3...`);
-
-                await new Promise(resolve => setTimeout(resolve, 2000));
-
-                continue;
-            }
-
-            throw err;
-        }
-
-    }
-
-    throw lastError;
-}
 
 // ============================================================
 // AniList GraphQL Query
@@ -11279,6 +10947,1068 @@ function pumpGenQueue() {
     job.resolve();
   }
 }
+/*
+|--------------------------------------------------------------------------
+| Telegram Report Assistant
+|--------------------------------------------------------------------------
+|
+| Features:
+| - /report command
+| - Collect report reason
+| - Collect Telegram evidence links
+| - Collect additional details
+| - Search official Telegram pages for @telegram.org addresses
+| - Show complete report draft
+| - Require manual confirmation before sending
+| - Send using your configured Gmail account
+| - Cancel / search again
+|
+|--------------------------------------------------------------------------
+*/
+
+const https = require("https");
+require("dotenv").config();
+
+
+/*
+|--------------------------------------------------------------------------
+| BOT
+|--------------------------------------------------------------------------
+*/
+
+
+
+
+/*
+|--------------------------------------------------------------------------
+| CONFIGURATION
+|--------------------------------------------------------------------------
+*/
+
+const OFFICIAL_TELEGRAM_PAGES = [
+  "https://telegram.org/faq",
+  "https://telegram.org/safety",
+  "https://core.telegram.org/bug-bounty"
+];
+
+
+/*
+|--------------------------------------------------------------------------
+| Only accept Telegram-owned addresses
+|--------------------------------------------------------------------------
+*/
+
+const OFFICIAL_EMAIL_REGEX =
+  /[A-Z0-9._%+-]+@telegram\.org/gi;
+
+
+/*
+|--------------------------------------------------------------------------
+| Temporary report sessions
+|--------------------------------------------------------------------------
+|
+| For production, you can move this into your database.
+|
+*/
+
+const reportSessions = new Map();
+
+
+/*
+|--------------------------------------------------------------------------
+| EMAIL TRANSPORTER
+|--------------------------------------------------------------------------
+|
+| .env:
+|
+| REPORT_FROM_EMAIL=yourgmail@gmail.com
+| REPORT_EMAIL_PASSWORD=your_app_password
+|
+|--------------------------------------------------------------------------
+*/
+
+const mailer = nodemailer.createTransport({
+  service: "gmail",
+
+  auth: {
+    user: process.env.REPORT_FROM_EMAIL,
+    pass: process.env.REPORT_EMAIL_PASSWORD
+  }
+});
+
+
+/*
+|--------------------------------------------------------------------------
+| HTML ESCAPE
+|--------------------------------------------------------------------------
+*/
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| FETCH OFFICIAL TELEGRAM PAGE
+|--------------------------------------------------------------------------
+*/
+
+function fetchPage(url) {
+  return new Promise((resolve, reject) => {
+
+    https.get(
+      url,
+
+      {
+        headers: {
+          "User-Agent":
+            "Miss-Aria-Report-Assistant/1.0"
+        }
+      },
+
+      response => {
+
+        let data = "";
+
+        response.setEncoding("utf8");
+
+
+        response.on("data", chunk => {
+          data += chunk;
+        });
+
+
+        response.on("end", () => {
+
+          if (
+            response.statusCode >= 200 &&
+            response.statusCode < 300
+          ) {
+
+            resolve(data);
+
+          } else {
+
+            reject(
+              new Error(
+                `HTTP ${response.statusCode} from ${url}`
+              )
+            );
+
+          }
+
+        });
+
+      }
+
+    ).on("error", reject);
+
+  });
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| SEARCH OFFICIAL TELEGRAM PAGES
+|--------------------------------------------------------------------------
+*/
+
+async function discoverTelegramEmails() {
+
+  const found = new Set();
+
+
+  for (const url of OFFICIAL_TELEGRAM_PAGES) {
+
+    try {
+
+      console.log(
+        `🔎 Searching official Telegram page: ${url}`
+      );
+
+
+      const html = await fetchPage(url);
+
+
+      const matches =
+        html.match(OFFICIAL_EMAIL_REGEX) || [];
+
+
+      for (const email of matches) {
+
+        const normalized =
+          email.toLowerCase().trim();
+
+
+        /*
+        |--------------------------------------------------------------
+        | Extra safety:
+        | Only accept @telegram.org
+        |--------------------------------------------------------------
+        */
+
+        if (
+          normalized.endsWith("@telegram.org")
+        ) {
+
+          found.add(normalized);
+
+        }
+
+      }
+
+    } catch (error) {
+
+      console.error(
+        `Failed to search ${url}:`,
+        error.message
+      );
+
+    }
+
+  }
+
+
+  return [...found];
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| EXTRACT TELEGRAM LINKS
+|--------------------------------------------------------------------------
+*/
+
+function extractTelegramLinks(text) {
+
+  return text.match(
+    /https?:\/\/(?:t\.me|telegram\.me)\/[^\s]+/gi
+  ) || [];
+
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| BUILD REPORT
+|--------------------------------------------------------------------------
+*/
+
+function buildReport({
+  reason,
+  links,
+  details
+}) {
+
+  return `Hello Telegram Support,
+
+I would like to report content on Telegram that I believe requires review.
+
+Reason:
+${reason}
+
+Telegram content:
+${links
+  .map(link => `• ${link}`)
+  .join("\n")}
+
+Additional details:
+${details || "None provided."}
+
+Please review the referenced content and take any appropriate action.
+
+Thank you.
+`;
+
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| /REPORT
+|--------------------------------------------------------------------------
+*/
+
+bot.onText(/^\/report$/i, async msg => {
+
+  const chatId = msg.chat.id;
+
+
+  reportSessions.set(chatId, {
+
+    step: "reason",
+
+    reason: "",
+
+    links: [],
+
+    details: "",
+
+    recipients: []
+
+  });
+
+
+  await bot.sendMessage(
+
+    chatId,
+
+`📝 <b>яєρσят αѕѕιѕтαηт</b>
+
+<b>ωнαт αяє уσυ яєρσятιηg?</b>
+
+єχαмρℓє:
+
+<code>Illegal content</code>
+<code>Spam</code>
+<code>Scam</code>
+<code>Copyright violation</code>
+<code>Security vulnerability</code>`,
+
+    {
+      parse_mode: "HTML"
+    }
+
+  );
+
+});
+
+
+/*
+|--------------------------------------------------------------------------
+| REPORT CONVERSATION
+|--------------------------------------------------------------------------
+*/
+
+bot.on("message", async msg => {
+
+  if (!msg.text) return;
+
+
+  const chatId = msg.chat.id;
+
+  const text = msg.text.trim();
+
+
+  /*
+  |--------------------------------------------------------------------------
+  | Ignore commands
+  |--------------------------------------------------------------------------
+  */
+
+  if (text.startsWith("/")) return;
+
+
+  const session =
+    reportSessions.get(chatId);
+
+
+  if (!session) return;
+
+
+  /*
+  |--------------------------------------------------------------------------
+  | STEP 1 — REASON
+  |--------------------------------------------------------------------------
+  */
+
+  if (session.step === "reason") {
+
+    session.reason = text;
+
+    session.step = "links";
+
+
+    await bot.sendMessage(
+
+      chatId,
+
+`🔗 <b>ѕєη∂ тнє тєℓєgяαм ¢σηтєηт ℓιηк(ѕ)</b>
+
+єχαмρℓє:
+
+<code>https://t.me/example/123</code>
+
+уσυ ¢αη ѕєη∂ мυℓтιρℓє ℓιηкѕ.`,
+
+      {
+        parse_mode: "HTML"
+      }
+
+    );
+
+
+    return;
+  }
+
+
+  /*
+  |--------------------------------------------------------------------------
+  | STEP 2 — TELEGRAM LINKS
+  |--------------------------------------------------------------------------
+  */
+
+  if (session.step === "links") {
+
+    const links =
+      extractTelegramLinks(text);
+
+
+    if (!links.length) {
+
+      await bot.sendMessage(
+
+        chatId,
+
+`⚠️ <b>ησ тєℓєgяαм ℓιηк ƒσυη∂</b>
+
+ρℓєαѕє ѕєη∂ α ℓιηк ℓιкє:
+
+<code>https://t.me/example/123</code>`,
+
+        {
+          parse_mode: "HTML"
+        }
+
+      );
+
+
+      return;
+    }
+
+
+    session.links = links;
+
+    session.step = "details";
+
+
+    await bot.sendMessage(
+
+      chatId,
+
+`📋 <b>α∂∂ιтισηαℓ ∂єтαιℓѕ</b>
+
+∂єѕ¢яιвє ωнαт нαρρєηє∂.
+
+σя туρє:
+
+<code>skip</code>`,
+
+      {
+        parse_mode: "HTML"
+      }
+
+    );
+
+
+    return;
+  }
+
+
+  /*
+  |--------------------------------------------------------------------------
+  | STEP 3 — DETAILS
+  |--------------------------------------------------------------------------
+  */
+
+  if (session.step === "details") {
+
+    session.details =
+      text.toLowerCase() === "skip"
+        ? ""
+        : text;
+
+
+    await bot.sendMessage(
+
+      chatId,
+
+`🔎 <b>ѕєαя¢нιηg σƒƒι¢ιαℓ тєℓєgяαм ραgєѕ...</b>
+
+ι'ℓℓ σƒƒι¢ιαℓℓу ¢нє¢к тєℓєgяαм-σωηє∂ ραgєѕ ƒσя
+ρυвℓιѕнє∂ <code>@telegram.org</code> α∂∂яєѕѕєѕ.`,
+
+      {
+        parse_mode: "HTML"
+      }
+
+    );
+
+
+    try {
+
+      session.recipients =
+        await discoverTelegramEmails();
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | No addresses found
+      |--------------------------------------------------------------------------
+      */
+
+      if (!session.recipients.length) {
+
+        await bot.sendMessage(
+
+          chatId,
+
+`❌ <b>ησ σƒƒι¢ιαℓ тєℓєgяαм α∂∂яєѕѕєѕ ƒσυη∂</b>
+
+тнє σƒƒι¢ιαℓ ραgєѕ ∂ι∂η'т яєтυяη αηу <code>@telegram.org</code> α∂∂яєѕѕ.`,
+
+          {
+            parse_mode: "HTML"
+          }
+
+        );
+
+
+        reportSessions.delete(chatId);
+
+        return;
+      }
+
+
+      session.step = "confirm";
+
+
+      const reportText =
+        buildReport(session);
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | REPORT PREVIEW
+      |--------------------------------------------------------------------------
+      */
+
+      await bot.sendMessage(
+
+        chatId,
+
+`📝 <b>яєρσят ∂яαƒт</b>
+
+<b>яєαѕση:</b>
+${escapeHtml(session.reason)}
+
+<b>єνι∂єη¢є:</b>
+${session.links
+  .map(link => `• ${escapeHtml(link)}`)
+  .join("\n")}
+
+<b>∂єтαιℓѕ:</b>
+${escapeHtml(session.details || "None")}
+
+━━━━━━━━━━━━━━
+
+📧 <b>σƒƒι¢ιαℓ тєℓєgяαм α∂∂яєѕѕєѕ ƒσυη∂:</b>
+
+${session.recipients
+  .map(email => `• ${escapeHtml(email)}`)
+  .join("\n")}
+
+━━━━━━━━━━━━━━
+
+<b>ємαιℓ ∂яαƒт:</b>
+
+${escapeHtml(reportText)}
+
+⚠️ <b>яєνιєω тнє ∂яαƒт вєƒσяє ѕєη∂ιηg.</b>`,
+
+        {
+
+          parse_mode: "HTML",
+
+          reply_markup: {
+
+            inline_keyboard: [
+
+              [
+
+                {
+                  text: "✅ ѕєη∂ яєρσят",
+                  callback_data:
+                    "report_confirm_send"
+                }
+
+              ],
+
+              [
+
+                {
+                  text: "🔄 ѕєαя¢н αgαιη",
+                  callback_data:
+                    "report_search_again"
+                },
+
+                {
+                  text: "❌ ¢αη¢єℓ",
+                  callback_data:
+                    "report_cancel"
+                }
+
+              ]
+
+            ]
+
+          }
+
+        }
+
+      );
+
+
+    } catch (error) {
+
+      console.error(
+        "Report search error:",
+        error
+      );
+
+
+      await bot.sendMessage(
+
+        chatId,
+
+`❌ <b>ƒαιℓє∂ тσ ѕєαя¢н σƒƒι¢ιαℓ тєℓєgяαм ραgєѕ.</b>
+
+ρℓєαѕє тяу αgαιη ℓαтєя.`,
+
+        {
+          parse_mode: "HTML"
+        }
+
+      );
+
+
+      reportSessions.delete(chatId);
+
+    }
+
+
+    return;
+  }
+
+});
+
+
+/*
+|--------------------------------------------------------------------------
+| CALLBACK HANDLER
+|--------------------------------------------------------------------------
+*/
+
+bot.on("callback_query", async query => {
+
+  const data = query.data;
+
+  const chatId =
+    query.message.chat.id;
+
+
+  const session =
+    reportSessions.get(chatId);
+
+
+  /*
+  |--------------------------------------------------------------------------
+  | CANCEL
+  |--------------------------------------------------------------------------
+  */
+
+  if (data === "report_cancel") {
+
+    reportSessions.delete(chatId);
+
+
+    await bot.answerCallbackQuery(
+      query.id,
+      {
+        text: "яєρσят ¢αη¢єℓℓє∂."
+      }
+    );
+
+
+    await bot.editMessageText(
+
+`❌ <b>яєρσят ¢αη¢єℓℓє∂</b>
+
+тнє ∂яαƒт ωαѕ ∂ιѕ¢αя∂є∂.`,
+
+      {
+
+        chat_id: chatId,
+
+        message_id:
+          query.message.message_id,
+
+        parse_mode: "HTML"
+
+      }
+
+    );
+
+
+    return;
+  }
+
+
+  /*
+  |--------------------------------------------------------------------------
+  | SEARCH AGAIN
+  |--------------------------------------------------------------------------
+  */
+
+  if (data === "report_search_again") {
+
+    if (!session) {
+
+      await bot.answerCallbackQuery(
+
+        query.id,
+
+        {
+          text:
+            "яєρσят ѕєѕѕιση єχριяє∂."
+        }
+
+      );
+
+      return;
+    }
+
+
+    await bot.answerCallbackQuery(
+
+      query.id,
+
+      {
+        text:
+          "ѕєαя¢нιηg σƒƒι¢ιαℓ ραgєѕ..."
+      }
+
+    );
+
+
+    try {
+
+      session.recipients =
+        await discoverTelegramEmails();
+
+
+      if (!session.recipients.length) {
+
+        await bot.editMessageText(
+
+`❌ <b>ησ σƒƒι¢ιαℓ α∂∂яєѕѕєѕ ƒσυη∂</b>`,
+
+          {
+
+            chat_id: chatId,
+
+            message_id:
+              query.message.message_id,
+
+            parse_mode: "HTML",
+
+            reply_markup: {
+
+              inline_keyboard: [
+
+                [
+
+                  {
+                    text: "🔄 ѕєαя¢н αgαιη",
+                    callback_data:
+                      "report_search_again"
+                  },
+
+                  {
+                    text: "❌ ¢αη¢єℓ",
+                    callback_data:
+                      "report_cancel"
+                  }
+
+                ]
+
+              ]
+
+            }
+
+          }
+
+        );
+
+        return;
+      }
+
+
+      await bot.editMessageText(
+
+`🔎 <b>σƒƒι¢ιαℓ α∂∂яєѕѕєѕ ƒσυη∂</b>
+
+${session.recipients
+  .map(email => `• ${escapeHtml(email)}`)
+  .join("\n")}
+
+━━━━━━━━━━━━━━
+
+⚠️ <b>яєνιєω тнє яєρσят ∂яαƒт вєƒσяє ѕєη∂ιηg.</b>`,
+
+        {
+
+          chat_id: chatId,
+
+          message_id:
+            query.message.message_id,
+
+          parse_mode: "HTML",
+
+          reply_markup: {
+
+            inline_keyboard: [
+
+              [
+
+                {
+                  text: "✅ ѕєη∂ яєρσят",
+                  callback_data:
+                    "report_confirm_send"
+                }
+
+              ],
+
+              [
+
+                {
+                  text: "❌ ¢αη¢єℓ",
+                  callback_data:
+                    "report_cancel"
+                }
+
+              ]
+
+            ]
+
+          }
+
+        }
+
+      );
+
+
+    } catch (error) {
+
+      console.error(
+        "Search again error:",
+        error
+      );
+
+
+      await bot.answerCallbackQuery(
+
+        query.id,
+
+        {
+          text: "ѕєαя¢н ƒαιℓє∂."
+        }
+
+      );
+
+    }
+
+
+    return;
+  }
+
+
+  /*
+  |--------------------------------------------------------------------------
+  | CONFIRM + SEND
+  |--------------------------------------------------------------------------
+  */
+
+  if (data === "report_confirm_send") {
+
+    if (
+      !session ||
+      session.step !== "confirm"
+    ) {
+
+      await bot.answerCallbackQuery(
+
+        query.id,
+
+        {
+          text:
+            "❌ яєρσят ѕєѕѕιση єχριяє∂."
+        }
+
+      );
+
+      return;
+    }
+
+
+    if (
+      !session.recipients ||
+      !session.recipients.length
+    ) {
+
+      await bot.answerCallbackQuery(
+
+        query.id,
+
+        {
+          text:
+            "❌ ησ яє¢ιριєηтѕ ƒσυη∂."
+        }
+
+      );
+
+      return;
+    }
+
+
+    await bot.answerCallbackQuery(
+
+      query.id,
+
+      {
+        text:
+          "ѕєη∂ιηg яєρσят..."
+      }
+
+    );
+
+
+    try {
+
+      /*
+      |--------------------------------------------------------------------------
+      | Build email
+      |--------------------------------------------------------------------------
+      */
+
+      const emailText =
+        buildReport(session);
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | SEND EMAIL
+      |--------------------------------------------------------------------------
+      */
+
+      const info =
+        await mailer.sendMail({
+
+          from:
+            process.env.REPORT_FROM_EMAIL,
+
+          to:
+            session.recipients.join(","),
+
+          subject:
+            `Telegram Report — ${session.reason}`,
+
+          text:
+            emailText
+
+        });
+
+
+      console.log(
+        "Report sent:",
+        info.messageId
+      );
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | SUCCESS
+      |--------------------------------------------------------------------------
+      */
+
+      await bot.editMessageText(
+
+`✅ <b>яєρσят ѕєηт ѕυ¢¢єѕѕƒυℓℓу</b>
+
+📧 <b>яє¢ιριєηтѕ:</b>
+
+${session.recipients
+  .map(email => `• ${escapeHtml(email)}`)
+  .join("\n")}
+
+📎 <b>єνι∂єη¢є:</b>
+${session.links.length} Telegram link(s)
+
+🆔 <b>ємαιℓ ι∂:</b>
+<code>${escapeHtml(info.messageId)}</code>`,
+
+        {
+
+          chat_id: chatId,
+
+          message_id:
+            query.message.message_id,
+
+          parse_mode: "HTML"
+
+        }
+
+      );
+
+
+      reportSessions.delete(chatId);
+
+
+    } catch (error) {
+
+      console.error(
+        "Email sending error:",
+        error
+      );
+
+
+      await bot.sendMessage(
+
+        chatId,
+
+`❌ <b>ƒαιℓє∂ тσ ѕєη∂ яєρσят</b>
+
+¢нє¢к уσυя gмαιℓ ¢σηƒιgυяαтιση.
+
+<b>єяяσя:</b>
+<code>${escapeHtml(error.message)}</code>`,
+
+        {
+          parse_mode: "HTML"
+        }
+
+      );
+
+    }
+
+
+    return;
+  }
+
+});
+
+
+/*
+|--------------------------------------------------------------------------
+| STARTUP
+|--------------------------------------------------------------------------
+*/
 
 function genQueuePosition(isPriority) {
   // How many jobs are currently ahead of a new job of this priority.
@@ -12432,7 +13162,8 @@ ${anime.description
 
                         text:"📖 αηιℓιѕт",
 
-                        url:anime.siteUrl
+                        url:anime.siteUrl,
+                        style:'primary'
 
                     },
 
@@ -12440,7 +13171,8 @@ ${anime.description
 
                         text:"🎬 тяαιℓєя",
 
-                        url:trailer
+                        url:trailer,
+                        style: 'success'
 
                     }]:[])
 
@@ -12503,92 +13235,6 @@ Please try again in a few moments.
     }
 
 });
-async function generateAnimeImage(prompt, negative = "") {
-
-    // ---------- Try Prexzy ----------
-
-    try {
-
-        const url =
-`https://prexzyapis.com/ai/anime?prompt=${encodeURIComponent(prompt)}&negative_prompt=${encodeURIComponent(negative)}`;
-
-        const response = await axios.get(url, {
-
-            responseType: "arraybuffer",
-
-            validateStatus: () => true
-
-        });
-
-        const type = response.headers["content-type"] || "";
-
-        // Image returned
-
-        if (!type.includes("application/json")) {
-
-            return {
-
-                success: true,
-
-                source: "Prexzy",
-
-                image: Buffer.from(response.data)
-
-            };
-
-        }
-
-        // API returned JSON
-
-        const json = JSON.parse(
-
-            Buffer.from(response.data).toString()
-
-        );
-
-        console.log("Prexzy:", json);
-
-    }
-
-    catch (err) {
-
-        console.log("Prexzy Error:", err.message);
-
-    }
-
-    // ---------- Pollinations Fallback ----------
-
-    try {
-
-        const pollinations =
-
-`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt + " anime artwork, masterpiece, best quality, 4k")}`;
-
-        return {
-
-            success: true,
-
-            source: "Pollinations",
-
-            image: pollinations
-
-        };
-
-    }
-
-    catch (err) {
-
-        return {
-
-            success: false,
-
-            error: err.message
-
-        };
-
-    }
-
-}
     
 bot.onText(/^\/youtube1(?:\s+(.+))?$/i, async (msg, match) => {
 
@@ -13182,7 +13828,7 @@ bot.onText(/^\/animeimage(?:\s+([\s\S]+))?$/i, async (msg, match) => {
         return bot.sendMessage(
             chatId,
 
-`🌸 <b>мιѕѕ αяια • αηιмє ιмαgє</b>
+`🌸 <blockquote><b>мιѕѕ αяια • αηιмє ιмαgє</b></blockquote>
 
 <blockquote expandable='true'>
 
@@ -13546,8 +14192,9 @@ inline_keyboard:[
 text:"🔄 яєgєηєяαтє",
 
 callback_data:
-`anime_regen_${sessionId}`
+`anime_regen_${sessionId}`,
 
+style: 'success'
 },
 
 
@@ -13556,7 +14203,9 @@ callback_data:
 text:"🎨 New Prompt",
 
 switch_inline_query_current_chat:
-"/animeimage "
+"/animeimage ",
+
+style: 'primary'
 
 }
 
@@ -13947,6 +14596,7 @@ While playing, type "chat ai" or "talk to ai" any time to pause the game and go 
  *  - private chat + pending menu flow -> handle add-chat / promote-user
  *  - group message -> force-join gate, then image moderation
  * ============================================================ */
+
 bot.on("message", async (msg) => {
 
   const isPrivateMsg = msg.chat.type === "private";
@@ -15369,123 +16019,6 @@ Tap the buttons below, then press <b>✅ νєяιƒу</b>.`,
     }
   }
 
-  async function moderateStickerAndMedia(msg, { isChannel = false } = {}) {
-  const chatId = msg.chat.id;
-  const sender = msg.from; // may be undefined for anonymous channel posts
-  const senderId = sender ? sender.id : null;
-  const senderDisplayName = sender
-    ? [sender.first_name, sender.last_name].filter(Boolean).join(" ") || sender.username || String(sender.id)
-    : "channel admin";
-  const isCommand = msg.text && msg.text.startsWith("/");
-
-  // --- AI Sticker Recognition (unsafe content) ---
-  if (msg.sticker) {
-    try {
-      const result = await stickerRecognitionService.analyzeSticker({
-        bot,
-        stickerFileId: msg.sticker.file_id,
-        userId: senderId,
-      });
-
-      const analysis = result.text.toLowerCase();
-
-      if (
-        analysis.includes("unsafe") ||
-        analysis.includes("nsfw") ||
-        analysis.includes("sexual") ||
-        analysis.includes("violent") ||
-        analysis.includes("gore")
-      ) {
-        await bot.deleteMessage(chatId, msg.message_id);
-        incrementChatFlags(chatId, msg.chat.title);
-        console.log("🚫 Unsafe sticker removed:", analysis);
-        return true; // handled, stop further processing
-      }
-    } catch (error) {
-      console.error("Sticker AI moderation failed:", error.message);
-    }
-  }
-
-  // --- Sticker/GIF Lock ---
-  if (!isCommand && isStickerLockEnabled(chatId) && (msg.sticker || msg.animation)) {
-    const admins = await bot.getChatAdministrators(chatId).catch(() => []);
-    const isSenderAdmin = senderId ? admins.some((a) => a.user.id === senderId) : true; // channel posts are admin-only anyway
-
-    if (!isSenderAdmin) {
-      console.log("Flagged sticker/GIF from", senderDisplayName, senderId, "in chat", chatId);
-      try {
-        await bot.deleteMessage(chatId, msg.message_id);
-      } catch (err) {
-        console.error("Failed to delete sticker/GIF", err.message);
-      }
-      incrementChatFlags(chatId, msg.chat.title);
-      if (!isChannel && isWarnSystemEnabled(chatId)) {
-        await warnUser(chatId, senderId, senderDisplayName, "sticker/GIF not allowed");
-      }
-      return true;
-    }
-  }
-
-  // --- Slow Mode / Night Mode / Blacklist only make sense with a real sender ---
-  if (!isChannel && senderId) {
-    if (!isCommand && isSlowModeEnabled(chatId)) {
-      const admins = await bot.getChatAdministrators(chatId).catch(() => []);
-      const isSenderAdmin = admins.some((a) => a.user.id === senderId);
-      if (!isSenderAdmin) {
-        const key = `${chatId}:${senderId}`;
-        const now = Date.now();
-        const last = lastMessageTime.get(key) || 0;
-        if (now - last < SLOWMODE_GAP_MS) {
-          try {
-            await bot.deleteMessage(chatId, msg.message_id);
-          } catch (err) {
-            console.error("Failed to delete slow-mode message", err.message);
-          }
-          return true;
-        }
-        lastMessageTime.set(key, now);
-      }
-    }
-
-    if (!isCommand && isNightModeEnabled(chatId) && isQuietHours()) {
-      const admins = await bot.getChatAdministrators(chatId).catch(() => []);
-      const isSenderAdmin = admins.some((a) => a.user.id === senderId);
-      if (!isSenderAdmin) {
-        console.log("Flagged night-mode message from", senderDisplayName, senderId, "in chat", chatId);
-        try {
-          await bot.deleteMessage(chatId, msg.message_id);
-        } catch (err) {
-          console.error("Failed to delete night-mode message", err.message);
-        }
-        incrementChatFlags(chatId, msg.chat.title);
-        return true;
-      }
-    }
-
-    if (msg.text && !isCommand && getBlacklist(chatId).length > 0) {
-      const hit = matchBlacklist(chatId, msg.text);
-      if (hit) {
-        const admins = await bot.getChatAdministrators(chatId).catch(() => []);
-        const isSenderAdmin = admins.some((a) => a.user.id === senderId);
-        if (!isSenderAdmin) {
-          console.log("Flagged blacklisted word from", senderDisplayName, senderId, "in chat", chatId);
-          try {
-            await bot.deleteMessage(chatId, msg.message_id);
-          } catch (err) {
-            console.error("Failed to delete blacklisted-word message", err.message);
-          }
-          incrementChatFlags(chatId, msg.chat.title);
-          if (isWarnSystemEnabled(chatId)) {
-            await warnUser(chatId, senderId, senderDisplayName, `blacklisted word "${hit}"`);
-          }
-          return true;
-        }
-      }
-    }
-  }
-
-  return false; // nothing matched
-}
   // --- Custom admin-defined text rules (only runs if any rules are set) ---
   if (msg.text && !isCommand && getRules(chatId).length > 0) {
     try {
@@ -15671,7 +16204,6 @@ bot.on("channel_post", async (post) => {
     timestamp: Date.now()
   });
 
-  const content = post.text || post.caption || "";
 
   try {
     if (post.new_chat_photo || post.delete_chat_photo) {
@@ -16032,6 +16564,7 @@ bot.onText(/\/media/, async (msg) => {
 // CODE ASSISTANT — "code a website for me" style requests
 // ============================================================
 
+
 bot.on("message", async (msg) => {
   if (!msg.text || msg.text.startsWith("/")) return;
   if (msg.chat.type !== "private") return;
@@ -16077,8 +16610,8 @@ bot.on("message", async (msg) => {
     bot.sendMessage(msg.chat.id, "Got it — should I make this a single file/script, or a full project?", {
       reply_markup: {
         inline_keyboard: [[
-          { text: "ѕ¢яιρт (σηє ƒιℓє)", callback_data: "code_mode_file" },
-          { text: "ƒυℓℓ ρяσjє¢т", callback_data: "code_mode_script" }
+          { text: "ѕ¢яιρт (σηє ƒιℓє)", callback_data: "code_mode_file",style: 'success' },
+          { text: "ƒυℓℓ ρяσjє¢т", callback_data: "code_mode_script" ,style: 'primary'}
         ]]
       }
     });
@@ -16146,15 +16679,14 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      const dir = codeAssistant.saveGeneratedFiles(userId, `project_${Date.now()}`, files);
       bot.sendMessage(
         chatId,
         `Generated ${files.length} file(s):\n${files.map((f) => `- ${f.path}`).join("\n")}\n\nWant me to deploy it?`,
         {
           reply_markup: {
             inline_keyboard: [[
-              { text: "уєѕ, ∂єρℓσу ιт", callback_data: "code_deploy_yes" },
-              { text: "ησ, jυѕт zιρ ιт", callback_data: "code_deploy_no" }
+              { text: "уєѕ, ∂єρℓσу ιт", callback_data: "code_deploy_yes" ,style: 'primary'},
+              { text: "ησ, jυѕт zιρ ιт", callback_data: "code_deploy_no",style: 'success' }
             ]]
           }
         }
@@ -16178,8 +16710,8 @@ bot.on("callback_query", async (query) => {
       bot.sendMessage(chatId, "Where should I deploy it?", {
         reply_markup: {
           inline_keyboard: [[
-            { text: "gιтнυв", callback_data: "code_deploy_github" },
-            { text: "яєρℓιт (νια gιтнυв ιмρσят)", callback_data: "code_deploy_replit" }
+            { text: "gιтнυв", callback_data: "code_deploy_github" ,style: 'primary'},
+            { text: "яєρℓιт (νια gιтнυв ιмρσят)", callback_data: "code_deploy_replit",style: 'success' }
           ]]
         }
       });
@@ -16229,6 +16761,7 @@ bot.on("callback_query", async (query) => {
 });
 
 // Direct media link handler (separate, simple text listener)
+
 bot.on("message", async (msg) => {
   if (!msg.text || msg.chat.type !== "private") return;
   const state = mediaPending.get(msg.from.id);

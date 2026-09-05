@@ -3,6 +3,21 @@
 
 const { ok, fail, PERMISSION, define, requireBotAdmin } = require("./_shared");
 
+const sharp = require("sharp");
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+async function validateImageBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return fail("INVALID_IMAGE", "The supplied image is empty or invalid.");
+  if (buffer.length > MAX_IMAGE_BYTES) return fail("IMAGE_TOO_LARGE", "The image must be 10 MB or smaller.");
+  try {
+    const meta = await sharp(buffer).metadata();
+    if (!meta.format || !["jpeg", "jpg", "png", "webp"].includes(meta.format.toLowerCase())) return fail("UNSUPPORTED_IMAGE", "Unsupported image format.");
+    return null;
+  } catch {
+    return fail("CORRUPT_IMAGE", "The image could not be decoded and appears to be corrupted.");
+  }
+}
+
 /**
  * Reuses the exact same url/buffer resolution messaging.js's sendImage
  * already relies on, rather than a second copy of that logic.
@@ -87,6 +102,7 @@ define("updateBotProfilePicture", {
   async run({ sock }, { url, buffer }) {
     const source = resolveMediaSource({ url, buffer });
     if (!source) return fail("NO_MEDIA_SOURCE", "No image url or buffer was provided.");
+    if (source.buffer) { const invalid = await validateImageBuffer(source.buffer); if (invalid) return invalid; }
     try {
       await sock.updateProfilePicture(sock.user.id, source.buffer || { url: source.url });
       return ok({ updated: true });
@@ -122,6 +138,7 @@ define("updateGroupPicture", {
     if (denied) return denied;
     const source = resolveMediaSource({ url, buffer });
     if (!source) return fail("NO_MEDIA_SOURCE", "No image url or buffer was provided.");
+    if (source.buffer) { const invalid = await validateImageBuffer(source.buffer); if (invalid) return invalid; }
     try {
       await sock.updateProfilePicture(groupJid, source.buffer || { url: source.url });
       return ok({ groupJid, updated: true });

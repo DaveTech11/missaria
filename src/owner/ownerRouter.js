@@ -30,6 +30,57 @@ const bulk = require("./bulkOperations");
 const knowledgeStore = require("./knowledgeStore");
 const usageAnalytics = require("./usageAnalytics");
 const ownerContextStore = require("./ownerContext");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const sharp = require("sharp");
+const { downloadContentFromMessage } = require("@whiskeysockets/baileys");
+
+// Short-lived state for natural-language media workflows. Nothing here is
+// trusted from filenames/MIME declarations; the bytes are validated with
+// sharp before they ever reach a WhatsApp profile/group-picture API.
+const pendingMedia = new Map(); // ownerJid -> { action, groups?, expiresAt }
+const lastGroupLists = new Map(); // ownerJid -> [{ jid, subject }]
+const MEDIA_TTL_MS = 2 * 60 * 1000;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+function setPendingMedia(ownerJid, value) {
+  pendingMedia.set(ownerJid, { ...value, expiresAt: Date.now() + MEDIA_TTL_MS });
+}
+function getPendingMedia(ownerJid) {
+  const value = pendingMedia.get(ownerJid);
+  if (!value) return null;
+  if (value.expiresAt <= Date.now()) { pendingMedia.delete(ownerJid); return null; }
+  return value;
+}
+function clearPendingMedia(ownerJid) { pendingMedia.delete(ownerJid); }
+
+async function readImageBuffer(msg) {
+  const found = findMediaMessage(msg);
+  if (!found || found.type !== "image") return { success: false, error: "Send an image (or reply to one) for this operation." };
+  try {
+    const stream = await downloadContentFromMessage(found.content, "image");
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of stream) {
+      total += chunk.length;
+      if (total > MAX_IMAGE_BYTES) return { success: false, error: "That image is too large. Please send an image under 10 MB." };
+      chunks.push(chunk);
+    }
+    const raw = Buffer.concat(chunks);
+    if (!raw.length) return { success: false, error: "The image was empty." };
+    // Decode + normalize with sharp. This rejects corrupt/non-image bytes
+    // regardless of the user-supplied MIME type or filename.
+    const normalized = await sharp(raw)
+      .rotate()
+      .resize(640, 640, { fit: "cover", position: "centre" })
+      .jpeg({ quality: 90, mozjpeg: true })
+      .toBuffer();
+    return { success: true, buffer: normalized, width: 640, height: 640 };
+  } catch (err) {
+    return { success: false, error: "I couldn't validate that media as a readable image." };
+  }
+}
 
 function setContext(ownerJid, groupJid, groupSubject) {
   ownerContextStore.setGroupContext(ownerJid, groupJid, groupSubject);
@@ -289,6 +340,16 @@ async function tryHandleImpl({ sock, chatJid, senderJid, text, agentId, msg }) {
         await sock.sendMessage(chatJid, { text: bulk.summarizeResults(results) });
         return true;
       }
+      if (pending.action === "bulkUpdateGroupPicture") {
+        const results = [];
+        for (const group of pending.payload.groups || []) {
+          results.push(await toolExecutor.execute("updateGroupPicture", { sock, senderJid, groupJid: group.jid }, { groupJid: group.jid, buffer: pending.payload.buffer }));
+        }
+        const okCount = results.filter((r) => r.success).length;
+        const lines = results.map((r, i) => `${r.success ? "✅" : "❌"} ${pending.payload.groups[i].subject}${r.success ? " updated" : ` — ${friendlyError(r.error)}`}`);
+        await sock.sendMessage(chatJid, { text: `Group picture update: ${okCount}/${results.length} succeeded.\n\n${lines.join("\n")}` });
+        return true;
+      }
       const result = await toolExecutor.execute(pending.action, { sock, senderJid, groupJid: pending.payload.groupJid }, pending.payload);
       await sock.sendMessage(chatJid, { text: formatResult(pending.action, result, pending.targetLabel) });
       return true;
@@ -401,6 +462,7 @@ async function tryHandleImpl({ sock, chatJid, senderJid, text, agentId, msg }) {
   // 3. List groups
   if (/\b(list|show|my)\b.*\bgroups\b/.test(lower) || /\bwhich groups\b/.test(lower)) {
     const result = await toolExecutor.execute("getGroups", { sock, senderJid });
+    if (result.success) lastGroupLists.set(senderJid, result.data.map((g) => ({ jid: g.jid, subject: g.subject })));
     await sock.sendMessage(chatJid, { text: formatResult("getGroups", result) });
     return true;
   }
@@ -812,6 +874,38 @@ async function tryHandleImpl({ sock, chatJid, senderJid, text, agentId, msg }) {
     return true;
   }
 
+  // 11c. Natural-language picture workflows. The first message only asks
+  // for the image; the following image is validated, resized, then put
+  // behind the normal high-risk confirmation flow.
+  if (/\b(?:update|change|set)\b.*\b(?:my|your|miss aria(?:'s|s)?)\b.*\bprofile picture\b|\bupdate your profile picture\b|\bchange your profile picture\b/.test(lower)) {
+    setPendingMedia(senderJid, { action: "updateBotProfilePicture" });
+    await sock.sendMessage(chatJid, { text: "Send me the image you want to use." });
+    return true;
+  }
+
+  const thisGroupPicture = /\b(?:make|set|use|change|update)\b.*\b(?:this|current)\s+(?:the\s+)?group\s+(?:image|photo|picture)\b/i.test(t);
+  const groupPictureMatch = t.match(/\b(?:use|set|make|change|update)\b.*\b(?:image|photo|picture)\b.*?\b(?:for|as)\b\s+(?:the\s+)?(.+?)(?:\s+group)?\s*$/i);
+  if (thisGroupPicture || groupPictureMatch) {
+    const targetText = thisGroupPicture ? "this group" : groupPictureMatch[1].trim();
+    const lowerTarget = targetText.toLowerCase();
+    let groups = [];
+    if (/^(?:all|all 4|all four|these|those|the 4|the four)$/.test(lowerTarget)) {
+      groups = lastGroupLists.get(senderJid) || [];
+      if (!groups.length) {
+        await sock.sendMessage(chatJid, { text: "I don't have the group list in context. Say \"show me my groups\" first." });
+        return true;
+      }
+    } else {
+      const group = await resolveGroupOrAsk(sock, chatJid, senderJid, `in ${targetText}`);
+      if (!group) return true;
+      groups = [{ jid: group.jid, subject: group.subject }];
+    }
+    setPendingMedia(senderJid, { action: "updateGroupPicture", groups });
+    const list = groups.map((g, i) => `${i + 1}. ${g.subject}`).join("\n");
+    await sock.sendMessage(chatJid, { text: `Send me the image to use for:\n${list}` });
+    return true;
+  }
+
   // 12. Profile — "set my name to X", "set my status to X" / "set my about to X"
   const nameMatch = t.match(/\bset\s+my\s+name\s+to\s+(.+)/i);
   if (nameMatch) {
@@ -1018,6 +1112,36 @@ async function tryHandleImpl({ sock, chatJid, senderJid, text, agentId, msg }) {
   return false; // not recognized — let the existing router/AI reply handle it
 }
 
+async function handleMedia({ sock, chatJid, senderJid, msg }) {
+  if (!isOwner(senderJid)) return false;
+  const pending = getPendingMedia(senderJid);
+  if (!pending) return false;
+
+  const media = await readImageBuffer(msg);
+  if (!media.success) {
+    await sock.sendMessage(chatJid, { text: `❌ ${media.error}` });
+    return true;
+  }
+
+  if (pending.action === "updateBotProfilePicture") {
+    clearPendingMedia(senderJid);
+    const label = "Miss Aria's profile";
+    confirm.propose(senderJid, "updateBotProfilePicture", label, { buffer: media.buffer }, "Should I use this as my WhatsApp profile picture?");
+    await sock.sendMessage(chatJid, { text: "Got it. Should I use this as my WhatsApp profile picture? Reply \"yes\" to confirm, or \"no\" to cancel." });
+    return true;
+  }
+
+  if (pending.action === "updateGroupPicture") {
+    clearPendingMedia(senderJid);
+    const groups = pending.groups || [];
+    const list = groups.map((g, i) => `${i + 1}. ${g.subject}`).join("\n");
+    confirm.propose(senderJid, "bulkUpdateGroupPicture", "group pictures", { groups, buffer: media.buffer }, `Replace the group picture in these ${groups.length} groups?\n${list}`);
+    await sock.sendMessage(chatJid, { text: `⚠️ This will replace the current group picture in ${groups.length} group(s):\n${list}\n\nReply \"yes\" to confirm, or \"no\" to cancel.` });
+    return true;
+  }
+  return false;
+}
+
 async function proposeOrRun(sock, chatJid, ownerJid, action, payload, promptText, label) {
   const risk = confirm.riskOf(action);
   if (risk === confirm.RISK.LOW) {
@@ -1182,4 +1306,4 @@ function friendlyError(error) {
   }
 }
 
-module.exports = { tryHandle };
+module.exports = { tryHandle, handleMedia };

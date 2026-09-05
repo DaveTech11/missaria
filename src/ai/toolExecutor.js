@@ -39,7 +39,15 @@ async function execute(toolName, { sock, senderJid, groupJid }, args = {}) {
     return { success: false, data: null, error: { code: "UNKNOWN_TOOL", message: `No such tool: ${toolName}` } };
   }
 
-  const granted = tool.permission === PERMISSION.OWNER ? isOwner(senderJid) : true;
+  let granted = true;
+  if (tool.permission === PERMISSION.OWNER) {
+    granted = isOwner(senderJid);
+  } else if (tool.permission === PERMISSION.GROUP_ADMIN) {
+    if (!groupJid) {
+      return { success: false, data: null, error: { code: "GROUP_REQUIRED", message: "This operation requires a specific group." } };
+    }
+    granted = await require("../../services/waGroupManager").isSenderGroupAdmin(sock, groupJid, senderJid);
+  }
   if (!granted) {
     auditLog({ action: toolName, owner: senderJid, target: args.groupJid || args.jid || null, result: "unauthorized" });
     return {
