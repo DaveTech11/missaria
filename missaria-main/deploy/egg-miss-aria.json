@@ -1,0 +1,50 @@
+{
+  "_comment": "Miss Aria egg for Pterodactyl-style panels. Import via Admin -> Nests -> Import Egg. UNTESTED end-to-end (no Pterodactyl instance available to actually import this into) — the JSON structure follows the documented PTDL_v2 schema, but verify a real import before relying on it.",
+  "meta": {
+    "version": "PTDL_v2",
+    "update_url": null
+  },
+  "exported_at": "2026-08-27T00:00:00+00:00",
+  "name": "Miss Aria",
+  "author": "owner@example.com",
+  "description": "Miss Aria — owner-controlled WhatsApp agent (Baileys-based).",
+  "features": null,
+  "docker_images": {
+    "Node.js 20 (Debian, has build tools for canvas/sharp/better-sqlite3)": "ghcr.io/parkervcp/yolks:nodejs_20"
+  },
+  "file_denylist": [],
+  "startup": "node bot.js",
+  "config": {
+    "files": "{}",
+    "startup": "{\"done\": \"statusServer: listening\"}",
+    "logs": "{}",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\n# Real install script — installs the exact same system libraries the\n# Dockerfile does (canvas/puppeteer/better-sqlite3 native builds), then\n# runs npm install. Long-running: puppeteer downloads Chromium unless\n# PUPPETEER_SKIP_DOWNLOAD is set as an egg variable.\napt-get update\napt-get install -y python3 make g++ \\\n  libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev \\\n  libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \\\n  libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \\\n  libpangocairo-1.0-0 libgtk-3-0\ncd /mnt/server\nnpm install --omit=dev\necho \"Install complete.\"\n",
+      "container": "debian:bullseye-slim",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "name": "Owner WhatsApp Number",
+      "description": "The WhatsApp number (with country code, digits only) that should be treated as the bot owner. Sets OWNER_NUMBER in the environment.",
+      "env_variable": "OWNER_NUMBER",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|string|max:20"
+    },
+    {
+      "name": "Status Server Port",
+      "description": "Port for the health/status endpoint (server/statusServer.js). Most panels auto-assign this via the allocation system.",
+      "env_variable": "PORT",
+      "default_value": "3000",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|numeric"
+    }
+  ]
+}

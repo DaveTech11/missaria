@@ -1,0 +1,12 @@
+'use strict';
+const movie=require('../services/movieService');
+const animation=require('../services/movieAnimation');
+
+function kb(details){return {inline_keyboard:[[{text:'▶️ ᴡᴀᴛᴄʜ ᴏᴘᴛɪᴏɴs',url:movie.watchUrl(details),style:'success'},{text:'🎞️ ᴏғғɪᴄɪᴀʟ ᴛʀᴀɪʟᴇʀ',url:movie.trailer(details),style:'primary'}],[{text:'🔎 ᴍᴏʀᴇ ᴍᴏᴠɪᴇs',callback_data:'movie_search',style:'primary'},{text:'🏠 ᴍᴀɪɴ ᴍᴇɴᴜ',callback_data:'main_menu'}]]};}
+function resultsKb(results){return {inline_keyboard:results.map(x=>[{text:`🎬 ${x.title.slice(0,35)}${x.title.length>35?'…':''}`,callback_data:`movie:${x.id}`}]).concat([[{text:'🏠 ᴍᴀɪɴ ᴍᴇɴᴜ',callback_data:'main_menu'}]])};}
+async function show(bot,chatId,id){const details=await movie.movieDetails(id);const caption=movie.format(details);if(details.movie.poster_path) return bot.sendPhoto(chatId,`${movie.IMG}${details.movie.poster_path}`,{caption,parse_mode:'HTML',reply_markup:kb(details)});return bot.sendMessage(chatId,caption,{parse_mode:'HTML',reply_markup:kb(details)});}
+function registerMovie(bot){
+ bot.onText(/^\/(?:movie|movies)(?:@\w+)?(?:\s+(.+))?$/i,async(msg,match)=>{const q=match?.[1]?.trim();if(!q)return bot.sendMessage(msg.chat.id,'<blockquote><b>🎬 ᴀʀɪᴀ ᴍᴏᴠɪᴇ sᴛʀᴇᴀᴍ</b>\n\nᴜsᴇ <code>/movie avatar</code> ᴛᴏ ғɪɴᴅ ᴀ ᴍᴏᴠɪᴇ.\n\n✦ ᴍᴏᴠɪᴇ ᴅᴇᴛᴀɪʟs\n✦ ᴏғғɪᴄɪᴀʟ ᴛʀᴀɪʟᴇʀs\n✦ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴡᴀᴛᴄʜ ᴏᴘᴛɪᴏɴs</blockquote>',{parse_mode:'HTML'});try{const results=await animation.start(bot,msg.chat.id,q,()=>movie.searchMovies(q));if(!results.length)return bot.sendMessage(msg.chat.id,'<blockquote>🎬 ɴᴏ ᴍᴏᴠɪᴇs ғᴏᴜɴᴅ.</blockquote>',{parse_mode:'HTML'});if(results.length===1)return show(bot,msg.chat.id,results[0].id);return bot.sendMessage(msg.chat.id,'<blockquote><b>🎬 ᴍᴏᴠɪᴇ ʀᴇsᴜʟᴛs</b>\n\nᴘɪᴄᴋ ᴀ ᴍᴏᴠɪᴇ ʙᴇʟᴏᴡ:</blockquote>',{parse_mode:'HTML',reply_markup:resultsKb(results)});}catch(e){console.error('[MOVIE]',e);await bot.sendMessage(msg.chat.id,'<blockquote>❌ ᴍᴏᴠɪᴇ sᴇᴀʀᴄʜ ɪs ɴᴏᴛ ᴄᴏɴғɪɢᴜʀᴇᴅ. ᴀᴅᴅ <code>TMDB_API_KEY</code> ᴛᴏ ʏᴏᴜʀ ᴇɴᴠɪʀᴏɴᴍᴇɴᴛ.</blockquote>',{parse_mode:'HTML'});}});
+ bot.on('callback_query',async q=>{const d=q.data||'';try{if(d==='movie_search'){await bot.answerCallbackQuery(q.id,{text:'ᴜsᴇ /movie <title> ᴛᴏ sᴇᴀʀᴄʜ.'});return;}if(d.startsWith('movie:')){await bot.answerCallbackQuery(q.id,{text:'🎬 ʟᴏᴀᴅɪɴɢ...'});return show(bot,q.message.chat.id,d.slice(6));}if(d==='main_menu')return bot.answerCallbackQuery(q.id); }catch(e){console.error('[MOVIE CALLBACK]',e);await bot.answerCallbackQuery(q.id,{text:'❌ ᴍᴏᴠɪᴇ ʟᴏᴀᴅ ғᴀɪʟᴇᴅ.'}).catch(()=>{});}});
+}
+module.exports=registerMovie;
