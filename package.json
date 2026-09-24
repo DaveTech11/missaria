@@ -3,9 +3,10 @@
   "version": "21.0.0",
   "description": "Miss Aria Telegram AI companion — V20 unified AI, media, security, profile, premium and admin workspace",
   "main": "bot.js",
-  "engines": {
-    "node": ">=18.0.0"
-  },
+"engines": {
+  "node": "22.x",
+  "npm": "10.x"
+},
   "dependencies": {
     "@whiskeysockets/baileys": "github:xcoursed/baileys",
     "form-data": "^4.0.0",
