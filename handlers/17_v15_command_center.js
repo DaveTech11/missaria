@@ -1,0 +1,30 @@
+"use strict";
+const fs=require("fs"),path=require("path");
+const chats=require("../services/ariaChatStore");
+const saved=require("../services/ariaSavedResponses");
+const prefs=require("../services/ariaPreferences");
+const stats=require("../services/ariaUserStats");
+const CARD="https://files.catbox.moe/hjdxgx.jpg";
+const esc=s=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+function card(bot,id,text,reply_markup){return bot.sendPhoto(id,CARD,{caption:text,parse_mode:"HTML",reply_markup}).catch(()=>bot.sendMessage(id,text,{parse_mode:"HTML",reply_markup}));}
+function kb(){return {inline_keyboard:[
+ [{text:"💬 ᴄʜᴀᴛ",callback_data:"aria15_chat",style:"success"},{text:"🤖 ᴀɢᴇɴᴛ",callback_data:"aria15_agent",style:"primary"},{text:"🔎 ʀᴇsᴇᴀʀᴄʜ",callback_data:"aria15_research",style:"primary"}],
+ [{text:"💻 ᴄᴏᴅᴇ",callback_data:"aria15_code",style:"primary"},{text:"🎨 ɪᴍᴀɢᴇ",callback_data:"hub_images",style:"success"},{text:"📁 ғɪʟᴇs",callback_data:"aria14_file",style:"primary"}],
+ [{text:"🎵 ᴍᴜsɪᴄ",callback_data:"hub_music",style:"primary"},{text:"🎬 ᴍᴇᴅɪᴀ",callback_data:"hub_media",style:"primary"},{text:"🎮 ɢᴀᴍᴇs",callback_data:"hub_games",style:"primary"}],
+ [{text:"🧠 ᴍᴇᴍᴏʀʏ",callback_data:"aria_memory_open",style:"primary"},{text:"💾 sᴀᴠᴇᴅ",callback_data:"aria_saved_open",style:"primary"},{text:"⚙️ sᴇᴛᴛɪɴɢs",callback_data:"aria_settings_open",style:"primary"}],
+ [{text:"💬 ᴍʏ ᴄʜᴀᴛs",callback_data:"aria14_chats",style:"success"},{text:"👤 ᴘʀᴏғɪʟᴇ",callback_data:"aria15_profile",style:"primary"},{text:"📊 sᴛᴀᴛs",callback_data:"aria15_stats",style:"primary"}],
+ [{text:"🏠 ʜᴏᴍᴇ",callback_data:"main_menu",style:"success"}]
+]};}
+function modeFrom(text){const t=String(text||"").toLowerCase();if(/\b(code|coding|debug|javascript|typescript|python|node|sql|api|bug|function)\b/.test(t))return"💻 ᴄᴏᴅᴇ";if(/\b(research|source|sources|citation|latest|compare|evidence|investigate)\b/.test(t))return"🔎 ʀᴇsᴇᴀʀᴄʜ";if(/\b(story|poem|creative|caption|novel|imagine|script)\b/.test(t))return"🎨 ᴄʀᴇᴀᴛɪᴠᴇ";if(/\b(explain|teach|lesson|quiz|homework|study|tutorial)\b/.test(t))return"📚 ᴛᴜᴛᴏʀ";return"💬 ᴄʜᴀᴛ";}
+function isAdmin(ctx,id){try{return !!ctx.isOwner?.(id)||!!ctx.isBotAdmin?.(id)}catch{return false}}
+function exportChat(bot,chatId,userId,chatIdToExport){const item=chats.get(userId,chatIdToExport);if(!item)return bot.sendMessage(chatId,"❌ ᴄʜᴀᴛ ɴᴏᴛ ғᴏᴜɴᴅ.");const lines=(item.history||[]).map(x=>`${x.role||"message"}: ${String(x.content||x.text||"")}`);const file=path.join(process.cwd(),"data",`aria-chat-${item.id}.txt`);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,`Miss Aria — ${item.title}\nCreated: ${item.createdAt}\n\n${lines.join("\n\n")}`,"utf8");return bot.sendDocument(chatId,file,{caption:"📤 ᴄʜᴀᴛ ᴇxᴘᴏʀᴛ"}).catch(()=>bot.sendMessage(chatId,"❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴇxᴘᴏʀᴛ ᴛʜᴇ ᴄʜᴀᴛ."));}
+module.exports=function(ctx){const {bot,userHistory}=ctx;
+bot.onText(/^\/(?:commandcenter|center|workspace)(?:@\w+)?$/i,msg=>card(bot,msg.chat.id,"<blockquote><b>🌸 ᴍɪss ᴀʀɪᴀ — ᴄᴏᴍᴍᴀɴᴅ ᴄᴇɴᴛᴇʀ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n💬 ᴄʜᴀᴛ • 🤖 ᴀɢᴇɴᴛ • 🔎 ʀᴇsᴇᴀʀᴄʜ\n💻 ᴄᴏᴅᴇ • 🎨 ɪᴍᴀɢᴇ • 📁 ғɪʟᴇs\n🎵 ᴍᴜsɪᴄ • 🎬 ᴍᴇᴅɪᴀ • 🎮 ɢᴀᴍᴇs\n🧠 ᴍᴇᴍᴏʀʏ • 💾 sᴀᴠᴇᴅ • ⚙️ sᴇᴛᴛɪɴɢs\n👤 ᴘʀᴏғɪʟᴇ • 📊 sᴛᴀᴛs\n\n🧠 ᴀᴜᴛᴏ ᴍᴏᴅᴇ ᴄᴀɴ ᴅᴇᴛᴇᴄᴛ ᴡʜᴀᴛ ʏᴏᴜ ɴᴇᴇᴅ.</blockquote>",kb()));
+bot.onText(/^\/(?:profile|mystats)(?:@\w+)?$/i,msg=>{const u=stats.touch(msg.from.id,"commands");return card(bot,msg.chat.id,`<blockquote><b>👤 ʏᴏᴜʀ ᴀʀɪᴀ ᴘʀᴏғɪʟᴇ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🆔 ᴛᴇʟᴇɢʀᴀᴍ ɪᴅ: <code>${msg.from.id}</code>\n👤 ᴜsᴇʀɴᴀᴍᴇ: <b>${esc(msg.from.username?"@"+msg.from.username:"ɴᴏᴛ sᴇᴛ")}</b>\n🧠 ᴀɪ ᴍᴏᴅᴇ: <b>${esc(prefs.getMode(msg.from.id))}</b>\n💬 ᴍᴇssᴀɢᴇs: <b>${u.messages||0}</b>\n💾 sᴀᴠᴇᴅ: <b>${saved.list(msg.from.id).length}</b>\n💬 ᴀʀᴄʜɪᴠᴇᴅ ᴄʜᴀᴛs: <b>${chats.list(msg.from.id).length}</b>\n🔥 sᴛʀᴇᴀᴋ: <b>${stats.streak(msg.from.id)} ᴅᴀʏs</b></blockquote>`,kb())});
+bot.onText(/^\/stats(?:@\w+)?$/i,msg=>{const u=stats.touch(msg.from.id,"commands");return card(bot,msg.chat.id,`<blockquote><b>📊 ᴀɪ sᴛᴀᴛɪsᴛɪᴄs</b>\n\n💬 ᴍᴇssᴀɢᴇs: <b>${u.messages||0}</b>\n💾 sᴀᴠᴇᴅ ʀᴇsᴘᴏɴsᴇs: <b>${saved.list(msg.from.id).length}</b>\n💬 ᴄʜᴀᴛ ᴀʀᴄʜɪᴠᴇs: <b>${chats.list(msg.from.id).length}</b>\n🔥 ᴅᴀɪʟʏ sᴛʀᴇᴀᴋ: <b>${stats.streak(msg.from.id)}</b></blockquote>`,kb())});
+bot.onText(/^\/renamechat(?:@\w+)?\s+(\S+)\s+(.+)$/i,msg=>{const m=msg.text.match(/^\/renamechat(?:@\w+)?\s+(\S+)\s+(.+)$/i);const item=chats.update(msg.from.id,m[1],{title:m[2].slice(0,60)});return card(bot,msg.chat.id,item?`<blockquote>✏️ ᴄʜᴀᴛ ʀᴇɴᴀᴍᴇᴅ ᴛᴏ <b>${esc(item.title)}</b>.</blockquote>`:"❌ ᴄʜᴀᴛ ɴᴏᴛ ғᴏᴜɴᴅ.",kb())});
+bot.onText(/^\/searchchats(?:@\w+)?\s+(.+)$/i,msg=>{const q=msg.text.match(/^\/searchchats(?:@\w+)?\s+(.+)$/i)[1].toLowerCase();const items=chats.list(msg.from.id).filter(x=>String(x.title).toLowerCase().includes(q)||String(x.id).toLowerCase().includes(q));return card(bot,msg.chat.id,`<blockquote><b>🔎 ᴄʜᴀᴛ sᴇᴀʀᴄʜ</b>\n\n${items.length?items.slice(0,10).map(x=>`• <b>${esc(x.title)}</b>\n<code>${x.id}</code>`).join("\n\n"):"ɴᴏ ᴄʜᴀᴛs ᴍᴀᴛᴄʜᴇᴅ."}</blockquote>`,kb())});
+bot.onText(/^\/exportchat(?:@\w+)?\s+(\S+)$/i,msg=>exportChat(bot,msg.chat.id,msg.from.id,msg.text.match(/^\/exportchat(?:@\w+)?\s+(\S+)$/i)[1]));
+bot.on("message",msg=>{if(msg.from?.id&&!String(msg.text||"").startsWith("/"))stats.touch(msg.from.id,"messages")});
+bot.on("callback_query",async q=>{const d=String(q.data||""),id=q.from.id,cid=q.message?.chat?.id;if(!d.startsWith("aria15_"))return;try{await bot.answerCallbackQuery(q.id)}catch{}if(d==="aria15_profile")return bot.emit("text",Object.assign({},q.message,{text:"/profile",from:q.from,chat:q.message.chat}));if(d==="aria15_stats")return bot.sendMessage(cid,`📊 sᴛᴀᴛs\n\n💬 ${stats.get(id).messages||0} ᴍᴇssᴀɢᴇs\n🔥 ${stats.streak(id)} ᴅᴀʏ sᴛʀᴇᴀᴋ`,{parse_mode:"HTML"});const modes={aria15_chat:"chat",aria15_code:"coding",aria15_research:"research",aria15_agent:"chat"};if(modes[d]){prefs.setMode(id,modes[d]);return card(bot,cid,`<blockquote>✨ ᴀʀɪᴀ ᴍᴏᴅᴇ sᴇᴛ: <b>${modes[d]}</b></blockquote>`,kb())}});
+};

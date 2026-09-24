@@ -1,0 +1,6 @@
+'use strict';
+const frames=['🔎 ᴇɴᴛᴇʀɪɴɢ ᴛʜᴇ ᴍᴏᴠɪᴇ ᴜɴɪᴠᴇʀsᴇ','🎬 sᴇᴀʀᴄʜɪɴɢ ᴛɪᴛʟᴇs','🎞️ ʟᴏᴀᴅɪɴɢ ᴍᴏᴠɪᴇ ᴅᴇᴛᴀɪʟs','⭐ ᴄʜᴇᴄᴋɪɴɢ ʀᴀᴛɪɴɢ & ɢᴇɴʀᴇ','📺 ᴄʜᴇᴄᴋɪɴɢ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴡᴀᴛᴄʜ ᴏᴘᴛɪᴏɴs','▶️ ғɪɴᴅɪɴɢ ᴏғғɪᴄɪᴀʟ ᴛʀᴀɪʟᴇʀ','✨ ᴘᴏʟɪsʜɪɴɢ ʀᴇsᴜʟᴛ'];
+function bar(n){const total=24,filled=Math.round(total*n/100);return '▰'.repeat(filled)+'▱'.repeat(total-filled)}
+async function start(bot,chatId,query,work){let id=null;try{const m=await bot.sendMessage(chatId,`<blockquote><b>🎬 ᴀʀɪᴀ ᴍᴏᴠɪᴇ sᴛʀᴇᴀᴍ</b>\n\n${frames[0]}\n${bar(8)}  <b>8%</b>\n\n🔎 ${query}</blockquote>`,{parse_mode:'HTML'});id=m.message_id;for(let i=1;i<frames.length;i++){await new Promise(r=>setTimeout(r,650));const p=Math.round(((i+1)/frames.length)*90);await bot.editMessageText(`<blockquote><b>🎬 ᴀʀɪᴀ ᴍᴏᴠɪᴇ sᴛʀᴇᴀᴍ</b>\n\n${frames[i]}\n${bar(p)}  <b>${p}%</b>\n\n🔎 ${query}</blockquote>`,{chat_id:chatId,message_id:id,parse_mode:'HTML'}).catch(()=>{});}const result=await work();await bot.editMessageText(`<blockquote><b>🎬 ᴍᴏᴠɪᴇ ʀᴇᴀᴅʏ</b>\n\n${bar(100)}  <b>100%</b>\n\n✦ ${query}</blockquote>`,{chat_id:chatId,message_id:id,parse_mode:'HTML'}).catch(()=>{});return result;}catch(e){if(id)await bot.editMessageText(`<blockquote><b>🎬 ᴍᴏᴠɪᴇ sᴛʀᴇᴀᴍ</b>\n\n❌ ᴜɴᴀʙʟᴇ ᴛᴏ ғɪɴɪsʜ ᴛʜᴇ sᴇᴀʀᴄʜ.\n
+${String(e.message||e)}</blockquote>`,{chat_id:chatId,message_id:id,parse_mode:'HTML'}).catch(()=>{});throw e;}}
+module.exports={start};
